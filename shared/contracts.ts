@@ -8,6 +8,11 @@ export interface PublicUser { id: string; name: string; email: string; role: Rol
 export interface DashboardSummary {
   activeSubscriptions: number; invoicedRevenueMinor: number; collectedMinor: number;
   outstandingMinor: number; overdueMinor: number; overdueInvoices: number; currency: 'INR';
+  invoiceCount: number; asOf: string;
+}
+export interface DashboardOverdueInvoice {
+  id: string; number: string; customerName: string; dueDate: string;
+  totalMinor: number; paidMinor: number; outstandingMinor: number;
 }
 export type ApiResponse<T> = { data: T } | { error: { code: string; message: string; details?: unknown } };
 export interface Page<T> { items: T[]; page: number; pageSize: number; total: number }

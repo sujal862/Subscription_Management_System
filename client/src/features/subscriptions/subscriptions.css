@@ -27,6 +27,14 @@
 .sub-template-detail h3 { overflow-wrap: anywhere; }
 .sub-lifecycle { padding: 16px 0; border-block: 1px solid var(--border); margin-block: 16px; }
 .sub-lifecycle-run { margin-block: 16px; font-size: .85rem; }
+.sub-portal-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 290px), 1fr)); gap: 18px; }
+.sub-portal-card { border: 1px solid var(--border); border-radius: 10px; padding: 20px; min-width: 0; }
+.sub-portal-number { color: var(--muted); font-size: .8rem; overflow-wrap: anywhere; }
+.sub-portal-card .sub-details { grid-template-columns: repeat(2, minmax(0, 1fr)); font-size: .85rem; }
+.sub-portal-lines { display: grid; gap: 12px; }
+.sub-portal-lines article { border-bottom: 1px solid var(--border); padding-block: 12px; overflow-wrap: anywhere; }
+.sub-portal-lines h3 { font-size: 1rem; }
+.sub-customer-portal .sub-lifecycle > .sub-actions button { flex: 0 1 auto; }
 .sub-details { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); gap: 20px; }
 .sub-details dt { color: var(--muted); font-size: .78rem; }
 .sub-details dd { margin: 6px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; }

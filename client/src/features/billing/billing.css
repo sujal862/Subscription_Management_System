@@ -268,3 +268,65 @@
   gap: 12px;
   background: #fafbfa;
 }
+
+/* Print Styles */
+@media print {
+  /* Hide navigation, buttons, app shell */
+  header,
+  nav,
+  aside,
+  .no-print,
+  .btn-primary,
+  .btn-secondary,
+  .modal-footer,
+  .pagination-bar,
+  .billing-controls,
+  .billing-stats-grid {
+    display: none !important;
+  }
+
+  body {
+    background: #ffffff !important;
+    color: #000000 !important;
+  }
+
+  .printable-modal-overlay {
+    position: static !important;
+    background: none !important;
+    padding: 0 !important;
+    display: block !important;
+  }
+
+  .printable-invoice-card {
+    box-shadow: none !important;
+    border: none !important;
+    max-width: 100% !important;
+    max-height: none !important;
+    overflow: visible !important;
+    width: 100% !important;
+    padding: 0 !important;
+  }
+
+  .printable-body {
+    padding: 0 !important;
+  }
+
+  .billing-table th {
+    background: #f3f4f6 !important;
+    color: #111827 !important;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  .status-badge {
+    border: 1px solid #d1d5db;
+    -webkit-print-color-adjust: exact;
+    print-color-adjust: exact;
+  }
+
+  @page {
+    margin: 1.5cm;
+    size: auto;
+  }
+}
+

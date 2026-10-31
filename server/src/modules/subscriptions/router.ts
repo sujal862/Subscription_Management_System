@@ -5,7 +5,7 @@ import { randomBytes } from 'node:crypto';
 import { db } from '../../lib/db.js';
 import { asyncRoute, HttpError } from '../../lib/http.js';
 import { requireRole } from '../../middleware/auth.js';
-import { pendingRouter } from '../../lib/pending-router.js';
+export { subscriptionPortalRouter } from './portal.js';
 import { draftSchema, customerSchema, pageSchema, amounts } from './validation.js';
 import { templatesRouter, quotationSchema, createQuotation } from './quotations.js';
 import { lifecycleInclude, lifecycleTransitionSchema, transitionSubscription, renewalSchema, renewSubscription, processSubscriptionLifecycle } from './lifecycle.js';
@@ -128,5 +128,4 @@ function customerConflict(error: unknown): never {
 }
 export const subscriptionsRouter = Router();
 subscriptionsRouter.use(requireRole('ADMIN', 'STAFF'), createSubscriptionHandlers());
-export const subscriptionPortalRouter = pendingRouter('Customer subscriptions');
 if (process.env.NODE_ENV !== 'test') startSubscriptionLifecycleScheduler();

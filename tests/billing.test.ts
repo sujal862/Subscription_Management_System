@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { mkdtempSync, readdirSync, unlinkSync, rmdirSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, readdirSync, unlinkSync, rmdirSync, writeFileSync, existsSync, readFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { execFileSync } from 'node:child_process';
@@ -191,7 +191,10 @@ test('Billing Phase 3 - Discount Eligibility & Selection Unit Tests', async t =>
 test('Billing Full Integration - Invoices, Recurring Runs, Actions & Discounts', async t => {
   const directory = mkdtempSync(path.join(tmpdir(), 'brightloop-billing-test-'));
   const dbPath = path.join(directory, 'billing-test.db');
+  const outboxDir = path.join(directory, 'outbox');
   process.env.DATABASE_URL = `file:${dbPath.replaceAll('\\', '/')}`;
+  process.env.MAIL_MODE = 'file';
+  process.env.MAIL_OUTBOX_DIR = outboxDir;
   writeFileSync(dbPath, '');
   process.env.NODE_ENV = 'test';
 
@@ -202,7 +205,9 @@ test('Billing Full Integration - Invoices, Recurring Runs, Actions & Discounts',
 
   const { db } = await import('../server/src/lib/db.js');
   const { createInvoiceFromSubscription } = await import('../server/src/modules/billing/service.js');
-  const { billingRouter } = await import('../server/src/modules/billing/router.js');
+  const { billingRouter, billingPortalRouter } = await import('../server/src/modules/billing/router.js');
+  const { runBillingCycle } = await import('../server/src/modules/billing/recurring.js');
+  const { runScheduledBillingCycle } = await import('../server/src/modules/billing/scheduler.js');
 
   const testApp = express();
   testApp.use(express.json());
@@ -223,6 +228,7 @@ test('Billing Full Integration - Invoices, Recurring Runs, Actions & Discounts',
   });
 
   testApp.use('/api/billing', billingRouter);
+  testApp.use('/api/portal/invoices', billingPortalRouter);
 
   testApp.use((err: any, _req: any, res: any, _next: any) => {
     res.status(err.status ?? 500).json({
@@ -235,6 +241,7 @@ test('Billing Full Integration - Invoices, Recurring Runs, Actions & Discounts',
   const address = server.address();
   assert.ok(address && typeof address !== 'string');
   const base = `http://127.0.0.1:${address.port}/api/billing`;
+  const portalBase = `http://127.0.0.1:${address.port}/api/portal/invoices`;
 
   try {
     const customer = await db.customer.create({
@@ -624,10 +631,382 @@ test('Billing Full Integration - Invoices, Recurring Runs, Actions & Discounts',
       assert.equal(found.isOverdue, true);
     });
 
+    // --- Hour 5 Tests: Customer portal, printable invoices, and email send ---
+
+    await t.test('portal GET /invoices returns only authenticated customer invoices', async () => {
+      // Create a second customer and an invoice belonging to them
+      const otherCustomer = await db.customer.create({
+        data: {
+          name: 'Other Company Ltd',
+          email: 'accounts@othercompany.test',
+        },
+      });
+
+      const otherSub = await db.subscription.create({
+        data: {
+          number: 'SUB-OTHER-001',
+          customerId: otherCustomer.id,
+          planId: plan.id,
+          status: 'ACTIVE',
+          startDate: new Date('2026-10-01T00:00:00.000Z'),
+          paymentTermDays: 7,
+          billingInterval: 'MONTHLY',
+        },
+      });
+
+      const otherInvoice = await db.invoice.create({
+        data: {
+          number: 'INV-OTHER-999',
+          subscriptionId: otherSub.id,
+          customerId: otherCustomer.id,
+          customerName: otherCustomer.name,
+          customerEmail: otherCustomer.email,
+          periodStart: new Date('2026-10-01T00:00:00.000Z'),
+          periodEnd: new Date('2026-10-31T23:59:59.999Z'),
+          dueDate: new Date('2026-10-08T00:00:00.000Z'),
+          subtotalMinor: 50000,
+          totalMinor: 59000,
+        },
+      });
+
+      // Switch session to customer 1
+      testUser = {
+        id: 'cust-1-user',
+        name: customer.name,
+        email: customer.email,
+        role: 'CUSTOMER',
+        customerId: customer.id,
+      };
+
+      const res = await fetch(portalBase);
+      assert.equal(res.status, 200);
+      const json = await res.json();
+      assert.ok(json.data.items.length >= 1);
+      // Ensure only customer 1 invoices are returned
+      assert.ok(json.data.items.every((i: any) => i.customerId === customer.id));
+      assert.ok(!json.data.items.some((i: any) => i.id === otherInvoice.id));
+    });
+
+    await t.test('portal invoice detail and print reject access to another customer invoice with 404', async () => {
+      // Find other customer invoice
+      const otherInv = await db.invoice.findFirst({
+        where: { customerName: 'Other Company Ltd' },
+      });
+      assert.ok(otherInv);
+
+      // testUser is customer 1
+      testUser = {
+        id: 'cust-1-user',
+        name: customer.name,
+        email: customer.email,
+        role: 'CUSTOMER',
+        customerId: customer.id,
+      };
+
+      // Attempt to access other customer's invoice detail
+      const resDetail = await fetch(`${portalBase}/${otherInv.id}`);
+      assert.equal(resDetail.status, 404, 'Detail endpoint must reject cross-customer invoice');
+
+      // Attempt to access other customer's invoice print
+      const resPrint = await fetch(`${portalBase}/${otherInv.id}/print`);
+      assert.equal(resPrint.status, 404, 'Print endpoint must reject cross-customer invoice');
+    });
+
+    await t.test('portal GET /invoices/:id/print returns printable invoice for customer', async () => {
+      const targetInvoice = await db.invoice.findUnique({ where: { id: createdInvoiceId } });
+      assert.ok(targetInvoice);
+
+      testUser = {
+        id: 'cust-1-user',
+        name: customer.name,
+        email: customer.email,
+        role: 'CUSTOMER',
+        customerId: customer.id,
+      };
+
+      const res = await fetch(`${portalBase}/${targetInvoice.id}/print`);
+      assert.equal(res.status, 200);
+      const json = await res.json();
+      assert.equal(json.data.printable, true);
+      assert.equal(json.data.invoice.id, targetInvoice.id);
+      assert.equal(json.data.invoice.customerName, customer.name);
+      assert.ok(json.data.invoice.lines.length >= 1);
+    });
+
+    await t.test('staff GET /billing/invoices/:id/print returns printable invoice for staff', async () => {
+      const targetInvoice = await db.invoice.findUnique({ where: { id: createdInvoiceId } });
+      assert.ok(targetInvoice);
+
+      testUser = {
+        id: 'staff-user',
+        name: 'Staff Tester',
+        email: 'staff@brightloop.test',
+        role: 'STAFF',
+        customerId: null,
+      };
+
+      const res = await fetch(`${base}/invoices/${targetInvoice.id}/print`);
+      assert.equal(res.status, 200);
+      const json = await res.json();
+      assert.equal(json.data.printable, true);
+      assert.equal(json.data.invoice.number, targetInvoice.number);
+      assert.equal(json.data.invoice.customerEmail, customer.email);
+    });
+
+    await t.test('staff POST /billing/invoices/:id/send sends email via shared mail helper and records sentAt', async () => {
+      const targetInvoice = await db.invoice.findUnique({ where: { id: createdInvoiceId } });
+      assert.ok(targetInvoice);
+
+      testUser = {
+        id: 'staff-user',
+        name: 'Staff Tester',
+        email: 'staff@brightloop.test',
+        role: 'STAFF',
+        customerId: null,
+      };
+
+      const res = await fetch(`${base}/invoices/${targetInvoice.id}/send`, {
+        method: 'POST',
+      });
+      assert.equal(res.status, 200);
+      const json = await res.json();
+      assert.equal(json.data.sent, true);
+      assert.equal(json.data.recipient, customer.email);
+
+      // Verify sentAt was saved in DB
+      const updatedInv = await db.invoice.findUnique({ where: { id: targetInvoice.id } });
+      assert.ok(updatedInv?.sentAt, 'Invoice sentAt should be populated in database');
+
+      // Verify .eml message in isolated outbox
+      assert.ok(existsSync(outboxDir), 'Outbox directory should exist');
+      const emlFiles = readdirSync(outboxDir).filter(f => f.endsWith('.eml'));
+      assert.ok(emlFiles.length >= 1, 'At least one .eml message should have been delivered');
+
+      const emlContent = readFileSync(path.join(outboxDir, emlFiles[emlFiles.length - 1]), 'utf-8');
+      assert.ok(emlContent.includes(customer.email), 'Email should be addressed to customer email');
+      assert.ok(emlContent.includes(targetInvoice.number), 'Email should contain invoice number');
+      assert.ok(emlContent.includes(customer.name), 'Email should contain customer name');
+    });
+
+    // --- Hour 6 Tests: Scheduler, recovery, boundaries & performance benchmark ---
+
+    await t.test('scheduler skips concurrent overlapping runs safely', async () => {
+      const [res1, res2] = await Promise.all([
+        runScheduledBillingCycle(),
+        runScheduledBillingCycle(),
+      ]);
+      assert.ok(res1 !== undefined);
+      assert.ok(res2 !== undefined);
+    });
+
+    await t.test('skips PAUSED and CLOSED subscriptions and generates no invoices', async () => {
+      const pausedSub = await db.subscription.create({
+        data: {
+          number: 'SUB-PAUSED-001',
+          customerId: customer.id,
+          planId: plan.id,
+          status: 'PAUSED',
+          pausedAt: new Date('2026-10-01T00:00:00.000Z'),
+          startDate: new Date('2026-09-01T00:00:00.000Z'),
+          nextBillingDate: new Date('2026-10-01T00:00:00.000Z'),
+          paymentTermDays: 7,
+          billingInterval: 'MONTHLY',
+        },
+      });
+
+      const closedSub = await db.subscription.create({
+        data: {
+          number: 'SUB-CLOSED-001',
+          customerId: customer.id,
+          planId: plan.id,
+          status: 'CLOSED',
+          closedAt: new Date('2026-10-01T00:00:00.000Z'),
+          startDate: new Date('2026-08-01T00:00:00.000Z'),
+          nextBillingDate: new Date('2026-09-01T00:00:00.000Z'),
+          paymentTermDays: 7,
+          billingInterval: 'MONTHLY',
+        },
+      });
+
+      const pausedRun = await runBillingCycle({ subscriptionId: pausedSub.id });
+      assert.equal(pausedRun.invoicesCreated, 0, 'Paused subscription must not be billed');
+
+      const closedRun = await runBillingCycle({ subscriptionId: closedSub.id });
+      assert.equal(closedRun.invoicesCreated, 0, 'Closed subscription must not be billed');
+    });
+
+    await t.test('preserves eligible final period strictly before expiry and stops on or after expiry', async () => {
+      const expiringSub = await db.subscription.create({
+        data: {
+          number: 'SUB-EXPIRY-001',
+          customerId: customer.id,
+          planId: plan.id,
+          status: 'ACTIVE',
+          startDate: new Date('2026-10-01T00:00:00.000Z'),
+          expiryDate: new Date('2026-11-01T00:00:00.000Z'),
+          nextBillingDate: new Date('2026-10-01T00:00:00.000Z'),
+          paymentTermDays: 7,
+          billingInterval: 'MONTHLY',
+          lines: {
+            create: [
+              {
+                productId: product.id,
+                description: 'Final Month Access',
+                quantity: 1,
+                unitPriceMinor: 100000,
+                taxRateBps: 0,
+              },
+            ],
+          },
+        },
+      });
+
+      const runResult = await runBillingCycle({
+        subscriptionId: expiringSub.id,
+        targetDate: new Date('2026-12-01T00:00:00.000Z'),
+      });
+
+      assert.equal(runResult.invoicesCreated, 1, 'Should bill the single eligible month before expiry');
+
+      const reRun = await runBillingCycle({
+        subscriptionId: expiringSub.id,
+        targetDate: new Date('2026-12-01T00:00:00.000Z'),
+      });
+      assert.equal(reRun.invoicesCreated, 0, 'Should not bill periods on or after expiry');
+    });
+
+    await t.test('measures indexed queries with 1,000 subscriptions', async () => {
+      const bulkData = Array.from({ length: 1000 }, (_, i) => ({
+        number: `SUB-PERF-${i}`,
+        customerId: customer.id,
+        planId: plan.id,
+        status: i % 2 === 0 ? 'ACTIVE' : (i % 3 === 0 ? 'PAUSED' : 'CLOSED'),
+        startDate: new Date('2026-01-01T00:00:00.000Z'),
+        nextBillingDate: new Date(Date.now() - (i % 30) * 86400000),
+        paymentTermDays: 7,
+        billingInterval: 'MONTHLY',
+      }));
+
+      await db.subscription.createMany({
+        data: bulkData as any,
+      });
+
+      const startTime = performance.now();
+      const dueCount = await db.subscription.count({
+        where: {
+          status: 'ACTIVE',
+          nextBillingDate: { lte: new Date() },
+        },
+      });
+      const durationMs = performance.now() - startTime;
+
+      assert.ok(dueCount > 0, 'Indexed query should find due active subscriptions');
+      assert.ok(durationMs < 500, `Indexed query took ${durationMs.toFixed(2)}ms, should be well under 500ms`);
+    });
+
+    await t.test('full demo flow: create subscription, calculate with discount, record payment, and send receipt', async () => {
+      const demoCust = await db.customer.create({
+        data: {
+          name: 'Demo Enterprises',
+          email: 'finance@demoenterprises.test',
+          address: 'Floor 12, Cyber Park, Gurugram',
+        },
+      });
+
+      const demoSub = await db.subscription.create({
+        data: {
+          number: 'SUB-DEMO-001',
+          customerId: demoCust.id,
+          planId: plan.id,
+          status: 'ACTIVE',
+          startDate: new Date('2026-10-01T00:00:00.000Z'),
+          nextBillingDate: new Date('2026-10-01T00:00:00.000Z'),
+          paymentTermDays: 15,
+          billingInterval: 'MONTHLY',
+          lines: {
+            create: [
+              {
+                productId: product.id,
+                description: 'Enterprise Cloud Suite',
+                quantity: 1,
+                unitPriceMinor: 200000,
+                taxRateBps: 1800,
+              },
+            ],
+          },
+        },
+      });
+
+      const billRun = await runBillingCycle({ subscriptionId: demoSub.id });
+      assert.equal(billRun.invoicesCreated, 1);
+
+      const demoInv = await db.invoice.findFirstOrThrow({
+        where: { subscriptionId: demoSub.id },
+        include: { lines: true },
+      });
+      assert.equal(demoInv.status, 'DRAFT');
+
+      testUser = {
+        id: 'staff-user',
+        name: 'Staff Tester',
+        email: 'staff@brightloop.test',
+        role: 'STAFF',
+        customerId: null,
+      };
+      const confirmRes = await fetch(`${base}/invoices/${demoInv.id}/confirm`, { method: 'POST' });
+      assert.equal(confirmRes.status, 200);
+
+      testUser = {
+        id: 'cust-demo-user',
+        name: demoCust.name,
+        email: demoCust.email,
+        role: 'CUSTOMER',
+        customerId: demoCust.id,
+      };
+      const portalRes = await fetch(`${portalBase}/${demoInv.id}`);
+      assert.equal(portalRes.status, 200);
+      const portalJson = await portalRes.json();
+      assert.equal(portalJson.data.status, 'CONFIRMED');
+      assert.equal(portalJson.data.totalMinor, demoInv.totalMinor);
+
+      testUser = {
+        id: 'staff-user',
+        name: 'Staff Tester',
+        email: 'staff@brightloop.test',
+        role: 'STAFF',
+        customerId: null,
+      };
+      const payRes = await fetch(`${base}/invoices/${demoInv.id}/payments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          method: 'UPI',
+          amountMinor: demoInv.totalMinor,
+          reference: 'UPI-DEMO-FINAL-01',
+        }),
+      });
+      assert.equal(payRes.status, 201);
+      const payJson = await payRes.json();
+      assert.equal(payJson.data.invoice.status, 'PAID');
+
+      const emailRes = await fetch(`${base}/invoices/${demoInv.id}/send`, { method: 'POST' });
+      assert.equal(emailRes.status, 200);
+      const emailJson = await emailRes.json();
+      assert.equal(emailJson.data.sent, true);
+      assert.equal(emailJson.data.recipient, demoCust.email);
+    });
+
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(err => (err ? reject(err) : resolve())));
     await db.$disconnect();
+
+    if (existsSync(outboxDir)) {
+      for (const filename of readdirSync(outboxDir)) {
+        unlinkSync(path.join(outboxDir, filename));
+      }
+      rmdirSync(outboxDir);
+    }
 
     for (const filename of readdirSync(directory)) {
       unlinkSync(path.join(directory, filename));

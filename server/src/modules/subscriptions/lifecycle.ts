@@ -28,8 +28,8 @@ const conflict = (message: string, code = 'INVALID_TRANSITION'): never => { thro
 const denied = (message: string): never => { throw new HttpError(403, 'PLAN_ACTION_DENIED', message); };
 const utcDay = (now: Date) => new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 export const lifecycleResult = (subscription: Subscription) => ({ ...subscription, ...amounts(subscription.lines) });
-async function load(tx: Transaction, id: string) {
-  const subscription = await tx.subscription.findUnique({ where: { id }, include: lifecycleInclude });
+async function load(tx: Transaction, id: string, customerId?: string) {
+  const subscription = await tx.subscription.findFirst({ where: { id, ...(customerId ? { customerId } : {}) }, include: lifecycleInclude });
   if (!subscription) throw new HttpError(404, 'NOT_FOUND', 'Subscription not found');
   return subscription;
 }
@@ -55,15 +55,16 @@ function requireBillingCaughtUp(subscription: Subscription, boundary: Date) {
   if (!subscription.nextBillingDate || subscription.nextBillingDate < cutoff || (!exclusive && subscription.nextBillingDate.getTime() === cutoff.getTime())) conflict('Run billing for the outstanding periods before pausing or closing this subscription', 'BILLING_PENDING');
 }
 async function update(tx: Transaction, old: Subscription, data: Prisma.SubscriptionUpdateManyMutationInput) {
-  const changed = await tx.subscription.updateMany({ where: { id: old.id, status: old.status, updatedAt: old.updatedAt }, data });
+  const changed = await tx.subscription.updateMany({ where: { id: old.id, customerId: old.customerId, status: old.status, updatedAt: old.updatedAt }, data });
   if (changed.count !== 1) conflict('Subscription changed; refresh and retry', 'STALE_SUBSCRIPTION');
-  return lifecycleResult(await load(tx, old.id));
+  return lifecycleResult(await load(tx, old.id, old.customerId));
 }
 
-export async function transitionSubscription(id: string, input: z.infer<typeof lifecycleTransitionSchema>, now = new Date()) {
+export async function transitionSubscription(id: string, input: z.infer<typeof lifecycleTransitionSchema>, now = new Date(), customerId?: string) {
+  if (customerId && !['PAUSED', 'RESUME', 'CLOSED'].includes(input.action)) denied('This customer action is not permitted');
   if (input.action === 'QUOTATION') return quoteDraft(id, input.validDays);
   return db.$transaction(async tx => {
-    const subscription = await load(tx, id);
+    const subscription = await load(tx, id, customerId);
     switch (input.action) {
       case 'CONFIRMED':
         if (subscription.status !== 'QUOTATION') conflict('Only a quotation can be confirmed');
@@ -97,9 +98,9 @@ export async function transitionSubscription(id: string, input: z.infer<typeof l
   });
 }
 
-export async function renewSubscription(id: string, input: z.infer<typeof renewalSchema>, now = new Date()) {
+export async function renewSubscription(id: string, input: z.infer<typeof renewalSchema>, now = new Date(), customerId?: string) {
   return db.$transaction(async tx => {
-    const source = await load(tx, id);
+    const source = await load(tx, id, customerId);
     if (!['ACTIVE', 'PAUSED', 'CLOSED'].includes(source.status)) conflict('Only active, paused or closed subscriptions can be renewed');
     if (!source.plan.allowRenew) denied('This plan does not allow renewal');
     const startDate = new Date(`${input.startDate}T00:00:00.000Z`);

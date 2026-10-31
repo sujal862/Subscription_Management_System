@@ -54,6 +54,7 @@ interface InvoiceItem {
   paidAmountMinor: number;
   remainingBalanceMinor: number;
   isOverdue: boolean;
+  sentAt?: string | null;
   lines?: InvoiceLineItem[];
   payments?: InvoicePayment[];
   discountRedemptions?: DiscountRedemptionItem[];
@@ -101,6 +102,7 @@ export function BillingPage() {
   const [paymentNote, setPaymentNote] = useState<string>('');
   const [paymentDate, setPaymentDate] = useState<string>(new Date().toISOString().split('T')[0]);
   const [recordingPayment, setRecordingPayment] = useState(false);
+  const [sendingEmail, setSendingEmail] = useState(false);
 
   const fetchInvoices = useCallback(async () => {
     setLoading(true);
@@ -217,6 +219,24 @@ export function BillingPage() {
     }
   };
 
+  const handleSendInvoice = async (id: string) => {
+    setSendingEmail(true);
+    try {
+      const res = await api<{ sent: boolean; sentAt: string; recipient: string }>(
+        `/billing/invoices/${id}/send`,
+        { method: 'POST' }
+      );
+      alert(`✓ Invoice successfully sent to ${res.recipient}!`);
+      const updated = await api<InvoiceItem>(`/billing/invoices/${id}`);
+      setSelectedInvoice(updated);
+      await fetchInvoices();
+    } catch (err) {
+      alert(`Could not send invoice email: ${errorMessage(err)}`);
+    } finally {
+      setSendingEmail(false);
+    }
+  };
+
   const executeBillingRun = async () => {
     setRunningBilling(true);
     setRunMessage(null);
@@ -279,11 +299,11 @@ export function BillingPage() {
           <span className="stat-value">{formatMoney(totalInvoiced)}</span>
         </div>
         <div className="stat-card">
-          <span className="stat-label">Cash Collected</span>
+          <span className="stat-label">Cash Collected (Page)</span>
           <span className="stat-value" style={{ color: '#03543f' }}>{formatMoney(totalPaid)}</span>
         </div>
         <div className="stat-card">
-          <span className="stat-label">Outstanding Balance</span>
+          <span className="stat-label">Outstanding Balance (Page)</span>
           <span className="stat-value" style={{ color: totalOutstanding > 0 ? '#92400e' : 'inherit' }}>
             {formatMoney(totalOutstanding)}
           </span>
@@ -452,9 +472,9 @@ export function BillingPage() {
       </div>
 
       {selectedInvoice && (
-        <div className="modal-overlay" onClick={() => setSelectedInvoice(null)}>
-          <div className="modal-content" onClick={e => e.stopPropagation()}>
-            <div className="modal-header">
+        <div className="modal-overlay printable-modal-overlay" onClick={() => setSelectedInvoice(null)}>
+          <div className="modal-content printable-invoice-card" onClick={e => e.stopPropagation()}>
+            <div className="modal-header no-print">
               <div>
                 <h2>Invoice {selectedInvoice.number}</h2>
                 <span className={`status-badge status-${selectedInvoice.status}`} style={{ marginTop: 4 }}>
@@ -490,6 +510,11 @@ export function BillingPage() {
                     Period: {new Date(selectedInvoice.periodStart).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })} to{' '}
                     {new Date(selectedInvoice.periodEnd).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })}
                   </p>
+                  {selectedInvoice.sentAt && (
+                    <p style={{ fontSize: '0.8rem', color: '#03543f', marginTop: 6, fontWeight: 500 }}>
+                      ✉ Emailed on {new Date(selectedInvoice.sentAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })}
+                    </p>
+                  )}
                 </div>
               </div>
 
@@ -599,8 +624,8 @@ export function BillingPage() {
               </div>
             </div>
 
-            <div className="modal-footer" style={{ justifyContent: 'space-between' }}>
-              <div style={{ display: 'flex', gap: 10 }}>
+            <div className="modal-footer no-print" style={{ justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
                 {selectedInvoice.status === 'DRAFT' && (
                   <button
                     className="btn-primary"
@@ -618,6 +643,20 @@ export function BillingPage() {
                     + Record Payment
                   </button>
                 )}
+                <button
+                  className="btn-secondary"
+                  onClick={() => handleSendInvoice(selectedInvoice.id)}
+                  disabled={sendingEmail || actionLoading}
+                  title={selectedInvoice.sentAt ? `Last sent: ${new Date(selectedInvoice.sentAt).toLocaleString()}` : 'Send invoice via email'}
+                >
+                  {sendingEmail ? 'Sending...' : selectedInvoice.sentAt ? '✉ Resend Email' : '✉ Send Email'}
+                </button>
+                <button
+                  className="btn-secondary"
+                  onClick={() => window.print()}
+                >
+                  🖨 Print
+                </button>
                 {(selectedInvoice.status === 'DRAFT' || selectedInvoice.status === 'CONFIRMED') && (
                   <button
                     className="btn-secondary"

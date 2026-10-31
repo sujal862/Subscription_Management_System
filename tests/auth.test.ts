@@ -173,7 +173,7 @@ test('Hour 1 identity, session and access boundaries', async t => {
     assert.equal((await get('/staff', cookie)).status, 403);
     assert.equal((await get('/catalog/products', cookie)).status, 403);
     assert.equal((await get('/billing/invoices', cookie)).status, 403);
-    assert.equal((await get('/portal/subscriptions', cookie)).status, 501);
+    assert.equal((await get('/portal/subscriptions', cookie)).status, 200);
   });
 
   await t.test('unsafe browser origins cannot sign up, log in or log out', async () => {
