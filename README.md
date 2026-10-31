@@ -1,9 +1,10 @@
 # Brightloop - Subscription Management System
 
-One repository for a four-person hackathon team. **Member 1 Hour 1 adds backend
-signup/login/logout/session identity and role middleware.** Authentication UI,
-password reset, staff management, catalog, billing and reporting remain future work.
-Feature screens are still labeled placeholders; unfinished APIs return HTTP 501
+One repository for a four-person hackathon team. **Member 1 Hours 1-2 provide backend
+session authentication, login/signup UI, protected routes and role-aware navigation.**
+Member 3's customer/subscription drafts and Member 4's initial invoice work are
+integrated from main. Password reset,
+staff management and business reporting remain future work. Unfinished APIs return HTTP 501
 after authentication/authorization (401/403 if access is denied).
 
 ## Start locally
@@ -19,9 +20,10 @@ npm run setup
 npm run dev
 ```
 
-Open http://localhost:5173. API: http://localhost:4000/api/health.
-The overview checks the actual API/database connection. No account is required
-because no private data or functional business screens exist yet.
+Open http://localhost:5173; anonymous visitors are sent to /account/login.
+Use /account/signup to create a customer account and enter the customer portal.
+Existing ADMIN/STAFF accounts enter the internal workspace. There is no public
+role selector or seeded admin account. API health: http://localhost:4000/api/health.
 
 `setup` copies .env.example only if .env is missing, generates Prisma Client,
 applies committed migrations and runs the empty seed hook. It does not reset data.
@@ -78,12 +80,12 @@ The tests use a temporary SQLite database, not your local development data.
 client/src/features/    independent member UI folders
 client/src/components/ shared scaffold layout
 server/src/modules/    independent member API routers
-server/src/middleware/ future auth gates (currently fail closed)
+server/src/middleware/ session, role and request-origin checks
 server/src/lib/        DB, HTTP and configuration helpers
 shared/                response shapes, statuses and money formatting
 prisma/                agreed starting schema and migration history
 docs/prompts/          one prompt per member per hour
-tests/                 scaffold integration smoke tests
+tests/                 backend and DOM integration tests with isolated databases
 ```
 
 Included libraries for later steps: Zod, cookie-parser, express-rate-limit and
@@ -98,3 +100,9 @@ does not satisfy the hackathon problem statement.
 See [identity and session integration notes](docs/HOUR_1_HANDOFF.md) for working
 API routes, cookie behavior, teammate middleware hooks and remaining scope.
 No demo users are seeded yet. Public signup only creates CUSTOMER accounts.
+
+## Member 1 Hour 2 handoff
+
+See [UI and navigation integration notes](docs/HOUR_2_HANDOFF.md). Sessions restore
+from the HttpOnly cookie after refresh; customers see only their portal links.
+Run npm ci after pulling to install the pinned DOM-testing development dependencies.

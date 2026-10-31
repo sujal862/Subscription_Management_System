@@ -1,0 +1,11 @@
+.workspace-identity { margin-top: auto; padding: 28px 12px 0; overflow-wrap: anywhere; }
+.workspace-identity strong, .workspace-identity small { display: block; }
+.workspace-identity strong { font-size: .85rem; }
+.workspace-identity small { font-size: .72rem; color: #b5cabe; margin-top: 5px; }
+.workspace-identity .workspace-role { text-transform: capitalize; }
+.workspace-signout { display: block; margin-top: 18px; border: 1px solid #73937f; border-radius: 6px; min-height: 42px; width: 100%; padding: 10px; background: transparent; color: #f2f7ed; font: inherit; font-size: .8rem; cursor: pointer; }
+.workspace-signout:hover { background: #2a5447; }
+.workspace-signout:disabled { opacity: .65; cursor: wait; }
+.workspace-logout-error { font-size: .78rem; line-height: 1.5; color: #ffd5ca; }
+@media (min-width: 761px) { .workspace .sidebar { overflow-y: auto; } }
+@media (max-width: 760px) { .workspace-identity { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: center; gap: 12px; padding: 20px 0 0; } .workspace-identity small { margin-top: 3px; } .workspace-signout { margin-top: 0; width: auto; } .workspace-logout-error { grid-column: 1 / -1; margin: 0; } }
