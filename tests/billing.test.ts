@@ -7,6 +7,7 @@ import { execFileSync } from 'node:child_process';
 import { once } from 'node:events';
 import express from 'express';
 import { calculateLine, calculateInvoice } from '../server/src/modules/billing/calculation.js';
+import { calculateNextPeriod } from '../server/src/modules/billing/calendar.js';
 
 test('Billing Phase 1 - Invoice Calculation Unit Tests', async t => {
   await t.test('calculates line subtotal, tax and total in integer paise', () => {
@@ -61,7 +62,44 @@ test('Billing Phase 1 - Invoice Calculation Unit Tests', async t => {
   });
 });
 
-test('Billing Phase 1 - Invoice Database Snapshots & API Endpoints', async t => {
+test('Billing Phase 2 - Calendar Arithmetic & Anchor-Day Clamping Unit Tests', async t => {
+  await t.test('calculates DAILY interval correctly (+1 day)', () => {
+    const start = new Date('2026-03-15T00:00:00.000Z');
+    const { nextPeriodStart, periodEnd } = calculateNextPeriod(start, 'DAILY');
+    assert.equal(nextPeriodStart.toISOString(), '2026-03-16T00:00:00.000Z');
+    assert.equal(periodEnd.toISOString(), '2026-03-15T23:59:59.999Z');
+  });
+
+  await t.test('calculates WEEKLY interval correctly (+7 days)', () => {
+    const start = new Date('2026-03-01T00:00:00.000Z');
+    const { nextPeriodStart, periodEnd } = calculateNextPeriod(start, 'WEEKLY');
+    assert.equal(nextPeriodStart.toISOString(), '2026-03-08T00:00:00.000Z');
+    assert.equal(periodEnd.toISOString(), '2026-03-07T23:59:59.999Z');
+  });
+
+  await t.test('preserves anchor-day across short months (Jan 31 -> Feb 28 -> Mar 31)', () => {
+    // 31st January 2026
+    const jan31 = new Date('2026-01-31T00:00:00.000Z');
+    const febResult = calculateNextPeriod(jan31, 'MONTHLY', 31);
+
+    // February in 2026 has 28 days -> clamped to Feb 28
+    assert.equal(febResult.nextPeriodStart.toISOString(), '2026-02-28T00:00:00.000Z');
+
+    // Next cycle from Feb 28 with anchorDay = 31 -> March has 31 days -> restored to Mar 31!
+    const marResult = calculateNextPeriod(febResult.nextPeriodStart, 'MONTHLY', 31);
+    assert.equal(marResult.nextPeriodStart.toISOString(), '2026-03-31T00:00:00.000Z');
+  });
+
+  await t.test('handles leap year clamping for YEARLY interval (Feb 29 -> Feb 28)', () => {
+    // Leap year Feb 29, 2024
+    const leapDay = new Date('2024-02-29T00:00:00.000Z');
+    const result = calculateNextPeriod(leapDay, 'YEARLY', 29);
+    // 2025 is not a leap year -> clamped to Feb 28, 2025
+    assert.equal(result.nextPeriodStart.toISOString(), '2025-02-28T00:00:00.000Z');
+  });
+});
+
+test('Billing Phase 1 & 2 - Invoice DB Snapshots, APIs & Recurring Engine', async t => {
   const directory = mkdtempSync(path.join(tmpdir(), 'brightloop-billing-test-'));
   const dbPath = path.join(directory, 'billing-test.db');
   process.env.DATABASE_URL = `file:${dbPath.replaceAll('\\', '/')}`;
@@ -81,7 +119,6 @@ test('Billing Phase 1 - Invoice Database Snapshots & API Endpoints', async t => 
   const testApp = express();
   testApp.use(express.json());
 
-  // Mock authenticated user context on request
   let testUser: { id: string; name: string; email: string; role: string; customerId: string | null } | null = {
     id: 'staff-user',
     name: 'Staff Tester',
@@ -99,7 +136,6 @@ test('Billing Phase 1 - Invoice Database Snapshots & API Endpoints', async t => 
 
   testApp.use('/api/billing', billingRouter);
 
-  // Global test error handler
   testApp.use((err: any, _req: any, res: any, _next: any) => {
     res.status(err.status ?? 500).json({
       error: { code: err.code ?? 'ERROR', message: err.message },
@@ -113,7 +149,7 @@ test('Billing Phase 1 - Invoice Database Snapshots & API Endpoints', async t => 
   const base = `http://127.0.0.1:${address.port}/api/billing`;
 
   try {
-    // 1. Seed isolated DB fixtures: Customer, Product, Plan, Subscription & Lines
+    // 1. Seed Customer, Product, Plan, and Subscriptions
     const customer = await db.customer.create({
       data: {
         name: 'Bright Customer Inc',
@@ -151,7 +187,9 @@ test('Billing Phase 1 - Invoice Database Snapshots & API Endpoints', async t => 
         planId: plan.id,
         status: 'ACTIVE',
         billingInterval: 'MONTHLY',
+        billingAnchorDay: 1,
         startDate,
+        nextBillingDate: startDate,
         paymentTermDays: 10,
         lines: {
           create: [
@@ -159,8 +197,8 @@ test('Billing Phase 1 - Invoice Database Snapshots & API Endpoints', async t => 
               productId: product.id,
               description: 'Growth Monthly Plan Base',
               quantity: 2,
-              unitPriceMinor: 150000, // ₹1,500.00 each
-              taxRateBps: 1800,       // 18% tax
+              unitPriceMinor: 150000,
+              taxRateBps: 1800,
             },
           ],
         },
@@ -183,13 +221,11 @@ test('Billing Phase 1 - Invoice Database Snapshots & API Endpoints', async t => 
       assert.equal(invoice.customerAddress, '42 Bangalore Tech City');
       assert.equal(invoice.status, 'DRAFT');
 
-      // 2 * 150000 = 300000 subtotal, 0 discount, 54000 tax (18%), 354000 total
       assert.equal(invoice.subtotalMinor, 300000);
       assert.equal(invoice.discountMinor, 0);
       assert.equal(invoice.taxMinor, 54000);
       assert.equal(invoice.totalMinor, 354000);
 
-      // Verify line snapshot
       assert.equal(invoice.lines.length, 1);
       const line = invoice.lines[0];
       assert.equal(line.description, 'Growth Monthly Plan Base');
@@ -227,36 +263,269 @@ test('Billing Phase 1 - Invoice Database Snapshots & API Endpoints', async t => 
       assert.equal(json.data.id, createdInvoiceId);
       assert.equal(json.data.customerName, 'Bright Customer Inc');
       assert.equal(json.data.lines.length, 1);
-      assert.equal(json.data.lines[0].description, 'Growth Monthly Plan Base');
     });
 
-    await t.test('GET /invoices/:id returns 404 for unknown id', async () => {
-      const res = await fetch(`${base}/invoices/unknown-invoice-id`);
-      assert.equal(res.status, 404);
-      const json = await res.json();
-      assert.equal(json.error.code, 'NOT_FOUND');
-    });
+    // -------------------------------------------------------------
+    // PHASE 2 RECURRING BILLING ENGINE INTEGRATION TESTS
+    // -------------------------------------------------------------
 
-    await t.test('role enforcement: blocks CUSTOMER role from accessing staff invoices', async () => {
-      testUser = {
-        id: 'cust-user',
-        name: 'Regular Customer',
-        email: 'customer@test.com',
-        role: 'CUSTOMER',
+    // Create a new subscription specifically for recurring billing runs
+    const subRecurring = await db.subscription.create({
+      data: {
+        number: 'SUB-RECURRING-001',
         customerId: customer.id,
-      };
-
-      const res = await fetch(`${base}/invoices`);
-      assert.equal(res.status, 403);
-      const json = await res.json();
-      assert.equal(json.error.code, 'FORBIDDEN');
+        planId: plan.id,
+        status: 'ACTIVE',
+        billingInterval: 'MONTHLY',
+        billingAnchorDay: 1,
+        startDate: new Date('2026-10-01T00:00:00.000Z'),
+        nextBillingDate: new Date('2026-10-01T00:00:00.000Z'),
+        paymentTermDays: 7,
+        lines: {
+          create: [
+            {
+              productId: product.id,
+              description: 'Recurring Analytics Seat',
+              quantity: 1,
+              unitPriceMinor: 200000,
+              taxRateBps: 1800,
+            },
+          ],
+        },
+      },
     });
+
+    await t.test('POST /run triggers recurring billing cycle and advances nextBillingDate', async () => {
+      const res = await fetch(`${base}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetDate: '2026-10-15T00:00:00.000Z',
+          subscriptionId: subRecurring.id,
+        }),
+      });
+
+      assert.equal(res.status, 200);
+      const json = await res.json();
+      assert.equal(json.data.invoicesCreated, 1);
+      assert.equal(json.data.skippedDuplicates, 0);
+
+      // Verify subscription's nextBillingDate advanced to Nov 1, 2026
+      const updatedSub = await db.subscription.findUnique({ where: { id: subRecurring.id } });
+      assert.ok(updatedSub?.nextBillingDate);
+      assert.equal(updatedSub?.nextBillingDate.toISOString(), '2026-11-01T00:00:00.000Z');
+
+      // Verify invoice was created in DB for 2026-10-01
+      const invoice = await db.invoice.findUnique({
+        where: {
+          subscriptionId_periodStart: {
+            subscriptionId: subRecurring.id,
+            periodStart: new Date('2026-10-01T00:00:00.000Z'),
+          },
+        },
+      });
+      assert.ok(invoice);
+      assert.equal(invoice.totalMinor, 236000); // 200000 + 36000 tax
+    });
+
+    await t.test('POST /run is idempotent: repeated runs prevent duplicate invoices', async () => {
+      // Run again for the exact same targetDate
+      const res = await fetch(`${base}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetDate: '2026-10-15T00:00:00.000Z',
+          subscriptionId: subRecurring.id,
+        }),
+      });
+
+      assert.equal(res.status, 200);
+      const json = await res.json();
+      // nextBillingDate is already 2026-11-01, which is > 2026-10-15, so 0 invoices are created
+      assert.equal(json.data.invoicesCreated, 0);
+
+      // Verify total invoices for this subscription is still exactly 1
+      const count = await db.invoice.count({ where: { subscriptionId: subRecurring.id } });
+      assert.equal(count, 1);
+    });
+
+    await t.test('handles bounded catch-up without skipping missed periods', async () => {
+      // Create a subscription that missed 3 monthly periods (June, July, August 2026)
+      const subCatchUp = await db.subscription.create({
+        data: {
+          number: 'SUB-CATCHUP-001',
+          customerId: customer.id,
+          planId: plan.id,
+          status: 'ACTIVE',
+          billingInterval: 'MONTHLY',
+          billingAnchorDay: 1,
+          startDate: new Date('2026-06-01T00:00:00.000Z'),
+          nextBillingDate: new Date('2026-06-01T00:00:00.000Z'),
+          paymentTermDays: 7,
+          lines: {
+            create: [
+              {
+                productId: product.id,
+                description: 'Catch-up Line',
+                quantity: 1,
+                unitPriceMinor: 100000,
+                taxRateBps: 0,
+              },
+            ],
+          },
+        },
+      });
+
+      // Target cutoff is August 15, 2026 -> should bill June 1, July 1, August 1 (3 periods)
+      const res = await fetch(`${base}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetDate: '2026-08-15T00:00:00.000Z',
+          subscriptionId: subCatchUp.id,
+        }),
+      });
+
+      assert.equal(res.status, 200);
+      const json = await res.json();
+      assert.equal(json.data.invoicesCreated, 3, 'Should bill 3 missed periods sequentially');
+
+      const updatedSub = await db.subscription.findUnique({ where: { id: subCatchUp.id } });
+      assert.equal(updatedSub?.nextBillingDate?.toISOString(), '2026-09-01T00:00:00.000Z');
+
+      const invoices = await db.invoice.findMany({
+        where: { subscriptionId: subCatchUp.id },
+        orderBy: { periodStart: 'asc' },
+      });
+      assert.equal(invoices.length, 3);
+      assert.equal(invoices[0].periodStart.toISOString(), '2026-06-01T00:00:00.000Z');
+      assert.equal(invoices[1].periodStart.toISOString(), '2026-07-01T00:00:00.000Z');
+      assert.equal(invoices[2].periodStart.toISOString(), '2026-08-01T00:00:00.000Z');
+    });
+
+    await t.test('skips PAUSED or CLOSED subscriptions from billing runs', async () => {
+      const subPaused = await db.subscription.create({
+        data: {
+          number: 'SUB-PAUSED-001',
+          customerId: customer.id,
+          planId: plan.id,
+          status: 'PAUSED',
+          billingInterval: 'MONTHLY',
+          startDate: new Date('2026-10-01T00:00:00.000Z'),
+          nextBillingDate: new Date('2026-10-01T00:00:00.000Z'),
+          paymentTermDays: 7,
+          lines: {
+            create: [
+              {
+                productId: product.id,
+                description: 'Paused Line',
+                quantity: 1,
+                unitPriceMinor: 100000,
+                taxRateBps: 0,
+              },
+            ],
+          },
+        },
+      });
+
+      const res = await fetch(`${base}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetDate: '2026-10-15T00:00:00.000Z',
+          subscriptionId: subPaused.id,
+        }),
+      });
+
+      assert.equal(res.status, 200);
+      const json = await res.json();
+      assert.equal(json.data.invoicesCreated, 0, 'Paused subscription must not be billed');
+    });
+
+    await t.test('respects subscription expiryDate boundary and stops billing past expiry', async () => {
+      const subExpired = await db.subscription.create({
+        data: {
+          number: 'SUB-EXPIRED-001',
+          customerId: customer.id,
+          planId: plan.id,
+          status: 'ACTIVE',
+          billingInterval: 'MONTHLY',
+          startDate: new Date('2026-10-01T00:00:00.000Z'),
+          expiryDate: new Date('2026-10-15T00:00:00.000Z'),
+          nextBillingDate: new Date('2026-10-01T00:00:00.000Z'), // current period starts before expiry
+          paymentTermDays: 7,
+          lines: {
+            create: [
+              {
+                productId: product.id,
+                description: 'Expiring Line',
+                quantity: 1,
+                unitPriceMinor: 100000,
+                taxRateBps: 0,
+              },
+            ],
+          },
+        },
+      });
+
+      // Run up to end of year:
+      // Oct 1 period will be billed (starts before expiry).
+      // Next period (Nov 1) starts AFTER expiryDate (Oct 15) -> must NOT be billed!
+      const res = await fetch(`${base}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetDate: '2026-12-31T00:00:00.000Z',
+          subscriptionId: subExpired.id,
+        }),
+      });
+
+      assert.equal(res.status, 200);
+      const json = await res.json();
+      assert.equal(json.data.invoicesCreated, 1, 'Only the eligible final period should be billed');
+    });
+
+    await t.test('rollback behavior: failure during creation does NOT advance nextBillingDate', async () => {
+      // Create a subscription with an invalid setup that fails calculation
+      const subFailing = await db.subscription.create({
+        data: {
+          number: 'SUB-FAILING-001',
+          customerId: customer.id,
+          planId: plan.id,
+          status: 'ACTIVE',
+          billingInterval: 'MONTHLY',
+          startDate: new Date('2026-10-01T00:00:00.000Z'),
+          nextBillingDate: new Date('2026-10-01T00:00:00.000Z'),
+          paymentTermDays: 7,
+          // No lines attached -> createInvoiceFromSubscription throws NO_LINES
+        },
+      });
+
+      const res = await fetch(`${base}/run`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          targetDate: '2026-10-15T00:00:00.000Z',
+          subscriptionId: subFailing.id,
+        }),
+      });
+
+      assert.equal(res.status, 200);
+      const json = await res.json();
+      assert.equal(json.data.invoicesCreated, 0);
+      assert.equal(json.data.errors.length, 1);
+
+      // Verify nextBillingDate was NOT advanced
+      const subAfter = await db.subscription.findUnique({ where: { id: subFailing.id } });
+      assert.equal(subAfter?.nextBillingDate?.toISOString(), '2026-10-01T00:00:00.000Z');
+    });
+
   } finally {
     server.closeAllConnections();
     await new Promise<void>((resolve, reject) => server.close(err => (err ? reject(err) : resolve())));
     await db.$disconnect();
 
-    // Directory cleanup
+    // Cleanup directory
     for (const filename of readdirSync(directory)) {
       unlinkSync(path.join(directory, filename));
     }

@@ -54,6 +54,14 @@ interface InvoicesResponse {
   total: number;
 }
 
+interface BillingRunResponse {
+  targetDate: string;
+  processedSubscriptions: number;
+  invoicesCreated: number;
+  skippedDuplicates: number;
+  errors: Array<{ subscriptionId: string; subscriptionNumber: string; error: string }>;
+}
+
 export function BillingPage() {
   const [invoices, setInvoices] = useState<InvoiceItem[]>([]);
   const [totalCount, setTotalCount] = useState(0);
@@ -64,6 +72,12 @@ export function BillingPage() {
 
   const [selectedInvoice, setSelectedInvoice] = useState<InvoiceItem | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+
+  // Billing Run modal & state
+  const [runningBilling, setRunningBilling] = useState(false);
+  const [runMessage, setRunMessage] = useState<string | null>(null);
+  const [showRunModal, setShowRunModal] = useState(false);
+  const [runTargetDate, setRunTargetDate] = useState<string>(new Date().toISOString().split('T')[0]);
 
   const fetchInvoices = useCallback(async () => {
     setLoading(true);
@@ -101,6 +115,28 @@ export function BillingPage() {
     }
   };
 
+  const executeBillingRun = async () => {
+    setRunningBilling(true);
+    setRunMessage(null);
+    try {
+      const res = await api<BillingRunResponse>('/billing/run', {
+        method: 'POST',
+        body: JSON.stringify({
+          targetDate: runTargetDate ? `${runTargetDate}T23:59:59.999Z` : undefined,
+        }),
+      });
+      setRunMessage(
+        `✓ Billing cycle processed: ${res.processedSubscriptions} subscriptions checked, ${res.invoicesCreated} invoices created, ${res.skippedDuplicates} duplicates skipped.`
+      );
+      setShowRunModal(false);
+      await fetchInvoices();
+    } catch (err) {
+      alert(`Billing run failed: ${errorMessage(err)}`);
+    } finally {
+      setRunningBilling(false);
+    }
+  };
+
   const totalInvoiced = invoices.reduce((sum, inv) => sum + inv.totalMinor, 0);
   const totalPaid = invoices.reduce((sum, inv) => sum + inv.paidAmountMinor, 0);
   const totalOutstanding = invoices.reduce((sum, inv) => sum + inv.remainingBalanceMinor, 0);
@@ -115,10 +151,21 @@ export function BillingPage() {
             Manage recurring invoices, line calculations, snapshot records and customer payment balances.
           </p>
         </div>
-        <button className="btn-secondary" onClick={() => fetchInvoices()} disabled={loading}>
-          {loading ? 'Refreshing...' : '↻ Refresh'}
-        </button>
+        <div style={{ display: 'flex', gap: 10 }}>
+          <button className="btn-secondary" onClick={() => fetchInvoices()} disabled={loading}>
+            {loading ? 'Refreshing...' : '↻ Refresh'}
+          </button>
+          <button className="btn-primary" onClick={() => setShowRunModal(true)} disabled={runningBilling}>
+            ⚡ Run Billing Engine
+          </button>
+        </div>
       </div>
+
+      {runMessage && (
+        <div className="notice" style={{ background: '#eaf4e9', borderColor: '#b7dcbb', color: '#175039' }}>
+          <strong>{runMessage}</strong>
+        </div>
+      )}
 
       <div className="billing-stats-grid">
         <div className="stat-card">
@@ -377,6 +424,57 @@ export function BillingPage() {
             <div className="modal-footer">
               <button className="btn-secondary" onClick={() => setSelectedInvoice(null)}>
                 Close
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {showRunModal && (
+        <div className="modal-overlay" onClick={() => !runningBilling && setShowRunModal(false)}>
+          <div className="modal-content" style={{ maxWidth: 500 }} onClick={e => e.stopPropagation()}>
+            <div className="modal-header">
+              <h2>Run Recurring Billing</h2>
+              <button
+                className="btn-secondary"
+                onClick={() => setShowRunModal(false)}
+                disabled={runningBilling}
+              >
+                ✕
+              </button>
+            </div>
+            <div className="modal-body">
+              <p className="muted" style={{ margin: 0 }}>
+                This runs the recurring billing engine against all active customer subscriptions. Subscriptions due on or before the target date will generate invoices with snapshotted pricing and advance their next billing dates atomically.
+              </p>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <label htmlFor="targetDateInput" style={{ fontSize: '0.85rem', fontWeight: 600 }}>
+                  Billing Cutoff Date:
+                </label>
+                <input
+                  id="targetDateInput"
+                  type="date"
+                  className="filter-select"
+                  value={runTargetDate}
+                  onChange={e => setRunTargetDate(e.target.value)}
+                  disabled={runningBilling}
+                />
+              </div>
+            </div>
+            <div className="modal-footer">
+              <button
+                className="btn-secondary"
+                onClick={() => setShowRunModal(false)}
+                disabled={runningBilling}
+              >
+                Cancel
+              </button>
+              <button
+                className="btn-primary"
+                onClick={executeBillingRun}
+                disabled={runningBilling}
+              >
+                {runningBilling ? 'Processing Invoices...' : 'Start Billing Run'}
               </button>
             </div>
           </div>
