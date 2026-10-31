@@ -7,12 +7,14 @@ import { asyncRoute, HttpError } from '../../lib/http.js';
 import { requireRole } from '../../middleware/auth.js';
 import { pendingRouter } from '../../lib/pending-router.js';
 import { draftSchema, customerSchema, pageSchema, amounts } from './validation.js';
-import { templatesRouter, quotationSchema, createQuotation, transitionSchema, quoteDraft } from './quotations.js';
+import { templatesRouter, quotationSchema, createQuotation } from './quotations.js';
+import { lifecycleInclude, lifecycleTransitionSchema, transitionSubscription, renewalSchema, renewSubscription, processSubscriptionLifecycle } from './lifecycle.js';
+import { startSubscriptionLifecycleScheduler } from './scheduler.js';
 
 const missing = (name: string): never => { throw new HttpError(404, 'NOT_FOUND', `${name} not found`); };
 const invalid = (message: string): never => { throw new HttpError(400, 'VALIDATION_ERROR', message); };
 const customerInclude = { _count: { select: { subscriptions: true } } } as const;
-const detailInclude = { customer: true, plan: { select: { id: true, name: true, interval: true, minimumQuantity: true } }, lines: true } as const;
+const detailInclude = lifecycleInclude;
 
 // Isolated tests mount these handlers. Production always applies the shared auth
 // gate in app.ts and the role gate on subscriptionsRouter below.
@@ -44,6 +46,10 @@ export function createSubscriptionHandlers() {
     catch (error) { customerConflict(error); }
   }));
   router.use('/templates', templatesRouter);
+  router.post('/process-lifecycle', asyncRoute(async (req, res) => {
+    z.object({}).strict().parse(req.body ?? {});
+    res.json({ data: await processSubscriptionLifecycle() });
+  }));
   router.get('/', asyncRoute(async (req, res) => {
     const { page, pageSize, search, status, customerId } = pageSchema.extend({ status: z.enum(SubscriptionStatus).optional(), customerId: z.string().min(1).optional() }).parse(req.query);
     const where: Prisma.SubscriptionWhereInput = { status, customerId, ...(search ? { OR: [{ number: { contains: search } }, { customer: { name: { contains: search } } }, { plan: { name: { contains: search } } }] } : {}) };
@@ -101,8 +107,11 @@ export function createSubscriptionHandlers() {
     res.status(201).json({ data: { ...data, ...amounts(data.lines) } });
   }));
   router.post('/:id/transition', asyncRoute(async (req, res) => {
-    const input = transitionSchema.parse(req.body);
-    res.json({ data: await quoteDraft(req.params.id, input.validDays) });
+    const input = lifecycleTransitionSchema.parse(req.body);
+    res.json({ data: await transitionSubscription(req.params.id, input) });
+  }));
+  router.post('/:id/renew', asyncRoute(async (req, res) => {
+    res.status(201).json({ data: await renewSubscription(req.params.id, renewalSchema.parse(req.body)) });
   }));
   router.get('/:id', asyncRoute(async (req, res) => {
     const data = await db.subscription.findUnique({ where: { id: req.params.id }, include: detailInclude }) ?? missing('Subscription');
@@ -120,3 +129,4 @@ function customerConflict(error: unknown): never {
 export const subscriptionsRouter = Router();
 subscriptionsRouter.use(requireRole('ADMIN', 'STAFF'), createSubscriptionHandlers());
 export const subscriptionPortalRouter = pendingRouter('Customer subscriptions');
+if (process.env.NODE_ENV !== 'test') startSubscriptionLifecycleScheduler();
