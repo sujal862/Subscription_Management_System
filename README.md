@@ -1,8 +1,10 @@
 # Brightloop - Subscription Management System
 
-One repository for a four-person hackathon team. **This commit is only the shared
-starter: no authentication, billing, catalog CRUD or business dashboard is complete.**
-All feature screens are labeled placeholders and business APIs return HTTP 501.
+One repository for a four-person hackathon team. **Member 1 Hour 1 adds backend
+signup/login/logout/session identity and role middleware.** Authentication UI,
+password reset, staff management, catalog, billing and reporting remain future work.
+Feature screens are still labeled placeholders; unfinished APIs return HTTP 501
+after authentication/authorization (401/403 if access is denied).
 
 ## Start locally
 
@@ -33,7 +35,7 @@ Read [team workflow](docs/TEAM.md), [API contract](docs/API_CONTRACT.md),
 
 | Member | Module | Prompt file | Working branch |
 |---|---|---|---|
-| 1 - leader | Auth, permissions, staff, dashboard | [Member 1](docs/prompts/MEMBER_1.md) | work/foundation |
+| 1 - leader | Auth, permissions, staff, dashboard | [Member 1](docs/prompts/MEMBER_1.md) | foundation |
 | 2 | Products, plans, taxes, discounts | [Member 2](docs/prompts/MEMBER_2.md) | work/catalog |
 | 3 | Customers, quotations, subscriptions | [Member 3](docs/prompts/MEMBER_3.md) | work/subscriptions |
 | 4 | Recurring invoices, payments | [Member 4](docs/prompts/MEMBER_4.md) | work/billing |
@@ -85,7 +87,14 @@ tests/                 scaffold integration smoke tests
 ```
 
 Included libraries for later steps: Zod, cookie-parser, express-rate-limit and
-Nodemailer. They are available but their feature integrations are not implemented.
+Nodemailer. Zod, cookie-parser and rate limits are used by the Hour 1 backend;
+email integration remains for Hour 4.
 The product must eventually persist business data, authorize every request, support
 the customer portal and pass the final acceptance checklist. This starter alone
 does not satisfy the hackathon problem statement.
+
+## Member 1 Hour 1 handoff
+
+See [identity and session integration notes](docs/HOUR_1_HANDOFF.md) for working
+API routes, cookie behavior, teammate middleware hooks and remaining scope.
+No demo users are seeded yet. Public signup only creates CUSTOMER accounts.
