@@ -8,3 +8,14 @@ export interface Detail extends Omit<Subscription, 'customer' | 'plan'> { custom
 export const businessDate = (value: string | null) => value ? new Intl.DateTimeFormat('en-IN', { timeZone: 'Asia/Kolkata', dateStyle: 'medium' }).format(new Date(value)) : '—';
 export interface TemplateSummary { id: string; name: string; planId: string; plan: { id: string; name: string }; validDays: number; paymentTermDays: number; createdAt: string; _count: { lines: number } }
 export interface Template extends Omit<TemplateSummary, '_count'> { lines: Detail['lines']; subtotalMinor: number; taxMinor: number; totalMinor: number }
+export type LifecycleView = Pick<Detail, 'id' | 'number' | 'status' | 'startDate' | 'expiryDate' | 'quotationValidUntil' | 'nextBillingDate' | 'pausedAt' | 'closedAt'> & {
+  billingAnchorDay?: number | null;
+  plan: Pick<Detail['plan'], 'name' | 'allowPause' | 'allowEarlyClose' | 'allowRenew' | 'autoClose'>;
+};
+export interface PortalSubscriptionSummary extends Omit<Subscription, 'customer' | 'plan'> {
+  billingInterval: string; nextBillingDate: string | null; plan: { name: string };
+}
+export interface PortalSubscriptionDetail extends Omit<PortalSubscriptionSummary, 'plan'>, LifecycleView {
+  paymentTermDays: number; subtotalMinor: number; taxMinor: number; totalMinor: number;
+  lines: Pick<Detail['lines'][number], 'id' | 'description' | 'quantity' | 'unitPriceMinor' | 'taxRateBps' | 'subtotalMinor' | 'taxMinor' | 'totalMinor'>[];
+}
