@@ -7,6 +7,7 @@ import { asyncRoute, HttpError } from '../../lib/http.js';
 import { requireRole } from '../../middleware/auth.js';
 import { pendingRouter } from '../../lib/pending-router.js';
 import { draftSchema, customerSchema, pageSchema, amounts } from './validation.js';
+import { templatesRouter, quotationSchema, createQuotation, transitionSchema, quoteDraft } from './quotations.js';
 
 const missing = (name: string): never => { throw new HttpError(404, 'NOT_FOUND', `${name} not found`); };
 const invalid = (message: string): never => { throw new HttpError(400, 'VALIDATION_ERROR', message); };
@@ -42,6 +43,7 @@ export function createSubscriptionHandlers() {
     try { res.json({ data: await db.customer.update({ where: { id: req.params.id }, data, include: customerInclude }) }); }
     catch (error) { customerConflict(error); }
   }));
+  router.use('/templates', templatesRouter);
   router.get('/', asyncRoute(async (req, res) => {
     const { page, pageSize, search, status, customerId } = pageSchema.extend({ status: z.enum(SubscriptionStatus).optional(), customerId: z.string().min(1).optional() }).parse(req.query);
     const where: Prisma.SubscriptionWhereInput = { status, customerId, ...(search ? { OR: [{ number: { contains: search } }, { customer: { name: { contains: search } } }, { plan: { name: { contains: search } } }] } : {}) };
@@ -52,6 +54,10 @@ export function createSubscriptionHandlers() {
     res.json({ data: { items, page, pageSize, total } });
   }));
   router.post('/', asyncRoute(async (req, res) => {
+    if (req.body && typeof req.body === 'object' && 'templateId' in req.body) {
+      const data = await createQuotation(quotationSchema.parse(req.body));
+      return void res.status(201).json({ data });
+    }
     const input = draftSchema.parse(req.body);
     const data = await db.$transaction(async tx => {
       if (!await tx.customer.findUnique({ where: { id: input.customerId } })) missing('Customer');
@@ -93,6 +99,10 @@ export function createSubscriptionHandlers() {
       throw new HttpError(409, 'CONFLICT', 'Could not allocate a subscription number; please retry');
     });
     res.status(201).json({ data: { ...data, ...amounts(data.lines) } });
+  }));
+  router.post('/:id/transition', asyncRoute(async (req, res) => {
+    const input = transitionSchema.parse(req.body);
+    res.json({ data: await quoteDraft(req.params.id, input.validDays) });
   }));
   router.get('/:id', asyncRoute(async (req, res) => {
     const data = await db.subscription.findUnique({ where: { id: req.params.id }, include: detailInclude }) ?? missing('Subscription');
