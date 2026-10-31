@@ -78,7 +78,7 @@ test('staff administration and integrated role boundaries', async t => {
     }
     assert.equal((await call('/portal/invoices', 'GET', undefined, staffCookie)).status, 403);
     const customer = await db.user.findUniqueOrThrow({ where: { email: 'customer@staff.test' } });
-    assert.equal((await call('/portal/subscriptions?customerId=someone-else', 'GET', undefined, customerCookie)).status, 501);
+    assert.equal((await call('/portal/subscriptions?customerId=someone-else', 'GET', undefined, customerCookie)).status, 400);
     await db.user.update({ where: { id: customer.id }, data: { customerId: null } });
     assert.equal((await call('/portal/subscriptions', 'GET', undefined, customerCookie)).status, 403);
   });
