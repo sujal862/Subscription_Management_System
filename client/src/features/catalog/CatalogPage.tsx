@@ -58,6 +58,29 @@ export interface TaxRule {
   updatedAt: string;
 }
 
+export interface DiscountRule {
+  id: string;
+  name: string;
+  kind: 'FIXED' | 'PERCENTAGE';
+  scope: 'PRODUCT' | 'SUBSCRIPTION';
+  value: number;
+  productId: string | null;
+  product?: {
+    id: string;
+    name: string;
+    salesPriceMinor: number;
+  };
+  minimumPurchaseMinor: number;
+  minimumQuantity: number;
+  startsAt: string;
+  endsAt: string | null;
+  usageLimit: number | null;
+  uses: number;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
 interface ProductFormData {
   name: string;
   type: string;
@@ -91,6 +114,20 @@ interface PlanFormData {
 interface TaxFormData {
   name: string;
   ratePercent: string;
+  isActive: boolean;
+}
+
+interface DiscountFormData {
+  name: string;
+  kind: 'FIXED' | 'PERCENTAGE';
+  scope: 'PRODUCT' | 'SUBSCRIPTION';
+  value: string;
+  productId: string;
+  minimumPurchase: string;
+  minimumQuantity: number;
+  startsAt: string;
+  endsAt: string;
+  usageLimit: string;
   isActive: boolean;
 }
 
@@ -130,8 +167,22 @@ const initialTaxFormData: TaxFormData = {
   isActive: true,
 };
 
+const initialDiscountFormData: DiscountFormData = {
+  name: '',
+  kind: 'PERCENTAGE',
+  scope: 'SUBSCRIPTION',
+  value: '10',
+  productId: '',
+  minimumPurchase: '0',
+  minimumQuantity: 1,
+  startsAt: new Date().toISOString().slice(0, 10),
+  endsAt: '',
+  usageLimit: '',
+  isActive: true,
+};
+
 export function CatalogPage() {
-  const [activeTab, setActiveTab] = useState<'products' | 'plans' | 'taxes'>('products');
+  const [activeTab, setActiveTab] = useState<'products' | 'plans' | 'taxes' | 'discounts'>('products');
 
   // Products state
   const [products, setProducts] = useState<Product[]>([]);
@@ -165,6 +216,18 @@ export function CatalogPage() {
   const [taxesLoading, setTaxesLoading] = useState(true);
   const [taxesError, setTaxesError] = useState<string | null>(null);
 
+  // Discount Rules state
+  const [discounts, setDiscounts] = useState<DiscountRule[]>([]);
+  const [discountPage, setDiscountPage] = useState(1);
+  const [discountPageSize, setDiscountPageSize] = useState(10);
+  const [discountTotal, setDiscountTotal] = useState(0);
+  const [discountSearch, setDiscountSearch] = useState('');
+  const [discountScopeFilter, setDiscountScopeFilter] = useState('');
+  const [discountKindFilter, setDiscountKindFilter] = useState('');
+  const [discountStatusFilter, setDiscountStatusFilter] = useState('');
+  const [discountsLoading, setDiscountsLoading] = useState(true);
+  const [discountsError, setDiscountsError] = useState<string | null>(null);
+
   // Modals state
   const [productModalMode, setProductModalMode] = useState<'create' | 'edit' | null>(null);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);
@@ -183,6 +246,10 @@ export function CatalogPage() {
   const [editingTax, setEditingTax] = useState<TaxRule | null>(null);
   const [taxFormData, setTaxFormData] = useState<TaxFormData>(initialTaxFormData);
 
+  const [discountModalMode, setDiscountModalMode] = useState<'create' | 'edit' | null>(null);
+  const [editingDiscount, setEditingDiscount] = useState<DiscountRule | null>(null);
+  const [discountFormData, setDiscountFormData] = useState<DiscountFormData>(initialDiscountFormData);
+
   const [formError, setFormError] = useState<string | null>(null);
   const [submitting, setSubmitting] = useState(false);
   const [successMessage, setSuccessMessage] = useState<string | null>(null);
@@ -192,6 +259,12 @@ export function CatalogPage() {
   const [calcPlanId, setCalcPlanId] = useState('');
   const [calcAddonProductId, setCalcAddonProductId] = useState('');
   const [calcResult, setCalcResult] = useState<any>(null);
+
+  // Discount Preview live eligibility state
+  const [showDiscountCalc, setShowDiscountCalc] = useState(false);
+  const [previewDiscountProductId, setPreviewDiscountProductId] = useState('');
+  const [previewDiscountQty, setPreviewDiscountQty] = useState(1);
+  const [discountPreviewResult, setDiscountPreviewResult] = useState<any>(null);
 
   // ---------------------------------------------------------------------------
   // Data Loaders
@@ -262,6 +335,29 @@ export function CatalogPage() {
     }
   }, [taxPage, taxPageSize, taxSearch, taxStatusFilter]);
 
+  const loadDiscounts = useCallback(async () => {
+    setDiscountsLoading(true);
+    setDiscountsError(null);
+    try {
+      const params = new URLSearchParams();
+      params.set('page', String(discountPage));
+      params.set('pageSize', String(discountPageSize));
+      if (discountSearch.trim()) params.set('search', discountSearch.trim());
+      if (discountScopeFilter) params.set('scope', discountScopeFilter);
+      if (discountKindFilter) params.set('kind', discountKindFilter);
+      if (discountStatusFilter === 'active') params.set('isActive', 'true');
+      if (discountStatusFilter === 'inactive') params.set('isActive', 'false');
+
+      const res = await api<Page<DiscountRule>>(`/catalog/discounts?${params.toString()}`);
+      setDiscounts(res.items);
+      setDiscountTotal(res.total);
+    } catch (err: unknown) {
+      setDiscountsError(errorMessage(err));
+    } finally {
+      setDiscountsLoading(false);
+    }
+  }, [discountPage, discountPageSize, discountSearch, discountScopeFilter, discountKindFilter, discountStatusFilter]);
+
   useEffect(() => {
     loadProducts();
   }, [loadProducts]);
@@ -271,8 +367,10 @@ export function CatalogPage() {
       loadPlans();
     } else if (activeTab === 'taxes') {
       loadTaxes();
+    } else if (activeTab === 'discounts') {
+      loadDiscounts();
     }
-  }, [activeTab, loadPlans, loadTaxes]);
+  }, [activeTab, loadPlans, loadTaxes, loadDiscounts]);
 
   // ---------------------------------------------------------------------------
   // Product Modal & Archive Handlers
@@ -357,7 +455,7 @@ export function CatalogPage() {
 
   const toggleProductArchive = async (product: Product) => {
     const action = product.isActive ? 'archive' : 'unarchive';
-    if (!window.confirm(`Are you sure you want to ${action} product "${product.name}"? Historical subscriptions will be preserved.`)) {
+    if (!window.confirm(`Are you sure you want to ${action} product "${product.name}"? Historical subscriptions and quotations will be preserved.`)) {
       return;
     }
     try {
@@ -541,7 +639,7 @@ export function CatalogPage() {
 
   const togglePlanArchive = async (plan: Plan) => {
     const action = plan.isActive ? 'archive' : 'unarchive';
-    if (!window.confirm(`Are you sure you want to ${action} plan "${plan.name}"? Subscriptions and quotes referencing this plan will remain valid.`)) {
+    if (!window.confirm(`Are you sure you want to ${action} plan "${plan.name}"? Subscriptions referencing this plan will remain valid.`)) {
       return;
     }
     try {
@@ -639,7 +737,131 @@ export function CatalogPage() {
   };
 
   // ---------------------------------------------------------------------------
-  // Pricing Calculation Demonstration
+  // Discount Rule Modal & Archive Handlers (Step 5)
+  // ---------------------------------------------------------------------------
+
+  const openCreateDiscount = () => {
+    setEditingDiscount(null);
+    setDiscountFormData(initialDiscountFormData);
+    setFormError(null);
+    setDiscountModalMode('create');
+  };
+
+  const openEditDiscount = (discount: DiscountRule) => {
+    setEditingDiscount(discount);
+    setDiscountFormData({
+      name: discount.name,
+      kind: discount.kind,
+      scope: discount.scope,
+      value: discount.kind === 'PERCENTAGE'
+        ? (discount.value / 100).toString()
+        : (discount.value / 100).toFixed(2),
+      productId: discount.productId || '',
+      minimumPurchase: (discount.minimumPurchaseMinor / 100).toFixed(2),
+      minimumQuantity: discount.minimumQuantity,
+      startsAt: discount.startsAt ? discount.startsAt.slice(0, 10) : '',
+      endsAt: discount.endsAt ? discount.endsAt.slice(0, 10) : '',
+      usageLimit: discount.usageLimit !== null ? String(discount.usageLimit) : '',
+      isActive: discount.isActive,
+    });
+    setFormError(null);
+    setDiscountModalMode('edit');
+  };
+
+  const handleDiscountSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setFormError(null);
+
+    const trimmedName = discountFormData.name.trim();
+    if (!trimmedName) {
+      setFormError('Discount name is required.');
+      return;
+    }
+
+    const valNum = parseFloat(discountFormData.value);
+    if (isNaN(valNum) || valNum < 0) {
+      setFormError('Discount value must be a valid positive number.');
+      return;
+    }
+
+    if (discountFormData.kind === 'PERCENTAGE' && valNum > 100) {
+      setFormError('Percentage discount cannot exceed 100%.');
+      return;
+    }
+
+    if (discountFormData.scope === 'PRODUCT' && !discountFormData.productId) {
+      setFormError('Target product must be selected for product-scoped discounts.');
+      return;
+    }
+
+    if (!discountFormData.startsAt) {
+      setFormError('Start date is required.');
+      return;
+    }
+
+    if (discountFormData.endsAt && discountFormData.endsAt < discountFormData.startsAt) {
+      setFormError('End date must be on or after start date.');
+      return;
+    }
+
+    const minPurchaseNum = parseFloat(discountFormData.minimumPurchase) || 0;
+    const usageLimitVal = discountFormData.usageLimit.trim() ? parseInt(discountFormData.usageLimit, 10) : null;
+
+    setSubmitting(true);
+    try {
+      const payload = {
+        name: trimmedName,
+        kind: discountFormData.kind,
+        scope: discountFormData.scope,
+        value: discountFormData.kind === 'PERCENTAGE' ? Math.round(valNum * 100) : Math.round(valNum * 100),
+        productId: discountFormData.scope === 'PRODUCT' ? discountFormData.productId : null,
+        minimumPurchaseMinor: Math.round(minPurchaseNum * 100),
+        minimumQuantity: Math.max(1, discountFormData.minimumQuantity),
+        startsAt: discountFormData.startsAt,
+        endsAt: discountFormData.endsAt || null,
+        usageLimit: usageLimitVal,
+        isActive: discountFormData.isActive,
+      };
+
+      if (discountModalMode === 'create') {
+        await api('/catalog/discounts', {
+          method: 'POST',
+          body: JSON.stringify(payload),
+        });
+        setSuccessMessage(`Discount rule "${trimmedName}" created successfully.`);
+      } else if (discountModalMode === 'edit' && editingDiscount) {
+        await api(`/catalog/discounts/${editingDiscount.id}`, {
+          method: 'PATCH',
+          body: JSON.stringify(payload),
+        });
+        setSuccessMessage(`Discount rule "${trimmedName}" updated successfully.`);
+      }
+
+      setDiscountModalMode(null);
+      loadDiscounts();
+    } catch (err: unknown) {
+      setFormError(errorMessage(err));
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const toggleDiscountArchive = async (discount: DiscountRule) => {
+    const action = discount.isActive ? 'archive' : 'unarchive';
+    if (!window.confirm(`Are you sure you want to ${action} discount "${discount.name}"? Historical invoice redemption snapshots will be preserved.`)) {
+      return;
+    }
+    try {
+      await api(`/catalog/discounts/${discount.id}/${action}`, { method: 'POST' });
+      setSuccessMessage(`Discount rule "${discount.name}" ${discount.isActive ? 'archived' : 'restored'} successfully.`);
+      loadDiscounts();
+    } catch (err: unknown) {
+      alert(`Failed to ${action} discount rule: ${errorMessage(err)}`);
+    }
+  };
+
+  // ---------------------------------------------------------------------------
+  // Pricing Calculation & Discount Preview Engines
   // ---------------------------------------------------------------------------
 
   const runPricingCalc = async () => {
@@ -678,9 +900,38 @@ export function CatalogPage() {
     }
   };
 
+  const runDiscountPreview = async () => {
+    if (!previewDiscountProductId && products.length === 0) {
+      alert('Please select a product to preview discount eligibility.');
+      return;
+    }
+    const targetProd = products.find(p => p.id === previewDiscountProductId) || products[0];
+    if (!targetProd) return;
+
+    try {
+      const res = await api<any>('/catalog/discounts/preview', {
+        method: 'POST',
+        body: JSON.stringify({
+          lines: [
+            {
+              productId: targetProd.id,
+              quantity: Math.max(1, previewDiscountQty),
+              unitPriceMinor: targetProd.salesPriceMinor,
+              taxRateBps: 1800,
+            },
+          ],
+        }),
+      });
+      setDiscountPreviewResult(res);
+    } catch (err: unknown) {
+      alert(`Discount preview failed: ${errorMessage(err)}`);
+    }
+  };
+
   const productTotalPages = Math.max(1, Math.ceil(productTotal / productPageSize));
   const planTotalPages = Math.max(1, Math.ceil(planTotal / planPageSize));
   const taxTotalPages = Math.max(1, Math.ceil(taxTotal / taxPageSize));
+  const discountTotalPages = Math.max(1, Math.ceil(discountTotal / discountPageSize));
 
   return (
     <div className="catalog-container">
@@ -690,7 +941,7 @@ export function CatalogPage() {
           <span className="eyebrow">CATALOG & BUSINESS CONFIGURATION</span>
           <h1>Product Catalog & Business Rules</h1>
           <p className="muted">
-            Manage your subscription products, recurring billing plans, lifecycle policies, and tax rules.
+            Manage your subscription products, recurring billing plans, lifecycle policies, tax rules, and promotional discounts.
           </p>
         </div>
         <div className="catalog-header-actions">
@@ -733,6 +984,27 @@ export function CatalogPage() {
               + Add Tax Rule
             </button>
           )}
+          {activeTab === 'discounts' && (
+            <div style={{ display: 'flex', gap: '8px' }}>
+              <button
+                type="button"
+                className="catalog-btn catalog-btn-secondary"
+                onClick={() => {
+                  setShowDiscountCalc(!showDiscountCalc);
+                  if (!previewDiscountProductId && products.length > 0) setPreviewDiscountProductId(products[0].id);
+                }}
+              >
+                {showDiscountCalc ? 'Hide Eligibility Preview' : 'Preview Eligibility'}
+              </button>
+              <button
+                type="button"
+                className="catalog-btn catalog-btn-primary"
+                onClick={openCreateDiscount}
+              >
+                + Add Discount Rule
+              </button>
+            </div>
+          )}
         </div>
       </div>
 
@@ -762,7 +1034,11 @@ export function CatalogPage() {
           Tax Rules
           <span className="catalog-tab-badge">Step 4</span>
         </button>
-        <button type="button" className="catalog-tab disabled" title="Available in Step 5">
+        <button
+          type="button"
+          className={`catalog-tab ${activeTab === 'discounts' ? 'active' : ''}`}
+          onClick={() => setActiveTab('discounts')}
+        >
           Discounts
           <span className="catalog-tab-badge">Step 5</span>
         </button>
@@ -775,7 +1051,7 @@ export function CatalogPage() {
         </div>
       )}
 
-      {/* Primary-Line Pricing Calculation Preview Banner */}
+      {/* Pricing Rule Preview Banner */}
       {showPricingCalc && (
         <div className="pricing-calc-box">
           <div className="pricing-calc-header">
@@ -849,12 +1125,82 @@ export function CatalogPage() {
         </div>
       )}
 
+      {/* Discount Eligibility Live Preview Banner */}
+      {showDiscountCalc && (
+        <div className="pricing-calc-box">
+          <div className="pricing-calc-header">
+            <div>
+              <span className="pricing-rule-badge">DETERMINISTIC 1-DISCOUNT SELECTION POLICY</span>
+              <h2 style={{ margin: '8px 0 4px' }}>Read-only Discount Eligibility Preview</h2>
+              <p className="muted" style={{ margin: 0, fontSize: '0.85rem' }}>
+                Evaluates active candidate discount rules and deterministically selects the single highest savings. Actual redemption is transacted atomically by Member 4 upon invoice generation.
+              </p>
+            </div>
+            <button
+              type="button"
+              className="catalog-btn catalog-btn-primary catalog-btn-small"
+              onClick={runDiscountPreview}
+            >
+              Check Live Eligibility
+            </button>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '16px' }}>
+            <div className="form-group">
+              <label>Select Product to Test:</label>
+              <select
+                className="catalog-select"
+                value={previewDiscountProductId}
+                onChange={(e) => setPreviewDiscountProductId(e.target.value)}
+              >
+                {products.map(prod => (
+                  <option key={prod.id} value={prod.id}>
+                    {prod.name} ({formatMoney(prod.salesPriceMinor)})
+                  </option>
+                ))}
+              </select>
+            </div>
+            <div className="form-group">
+              <label>Quantity:</label>
+              <input
+                type="number"
+                min="1"
+                className="form-input"
+                value={previewDiscountQty}
+                onChange={(e) => setPreviewDiscountQty(Math.max(1, parseInt(e.target.value, 10) || 1))}
+              />
+            </div>
+          </div>
+
+          {discountPreviewResult && (
+            <div style={{ background: '#f9fbf9', padding: '14px 18px', borderRadius: '8px', border: '1px solid var(--border)' }}>
+              {discountPreviewResult.data.eligible ? (
+                <div>
+                  <span className="type-pill" style={{ background: '#e6f4ea', color: '#137333', fontWeight: 700 }}>
+                    ✓ Eligible: {discountPreviewResult.data.selectedDiscount.name}
+                  </span>
+                  <div style={{ marginTop: '8px', fontSize: '0.9rem' }}>
+                    Savings: <strong>{formatMoney(discountPreviewResult.data.savingsMinor)}</strong> ({discountPreviewResult.data.selectedDiscount.kind} {discountPreviewResult.data.selectedDiscount.scope})
+                  </div>
+                  <p className="muted" style={{ margin: '4px 0 0', fontSize: '0.78rem' }}>
+                    {discountPreviewResult.data.policy}
+                  </p>
+                </div>
+              ) : (
+                <div style={{ color: 'var(--muted)', fontSize: '0.88rem' }}>
+                  ℹ {discountPreviewResult.data.message}
+                </div>
+              )}
+            </div>
+          )}
+        </div>
+      )}
+
       {/* --------------------------------------------------------------------- */}
       {/* TAB 1: PRODUCTS & VARIANTS                                            */}
       {/* --------------------------------------------------------------------- */}
       {activeTab === 'products' && (
         <>
-          {/* Filter Toolbar */}
           <div className="catalog-toolbar">
             <div className="catalog-filters">
               <input
@@ -909,7 +1255,6 @@ export function CatalogPage() {
             </div>
           </div>
 
-          {/* Products list states */}
           {productsLoading ? (
             <div className="panel empty-state">
               <span className="empty-symbol">⏳</span>
@@ -963,7 +1308,6 @@ export function CatalogPage() {
                           <div className="product-name">{product.name}</div>
                           {product.notes && <div className="product-notes">{product.notes}</div>}
                           
-                          {/* Variants list */}
                           <div className="variant-chips">
                             {product.variants && product.variants.length > 0 ? (
                               product.variants.map((v) => (
@@ -1026,7 +1370,6 @@ export function CatalogPage() {
                 </table>
               </div>
 
-              {/* Pagination */}
               <div className="catalog-pagination">
                 <div>
                   Showing page <strong>{productPage}</strong> of <strong>{productTotalPages}</strong> ({productTotal} total products)
@@ -1060,7 +1403,6 @@ export function CatalogPage() {
       {/* --------------------------------------------------------------------- */}
       {activeTab === 'plans' && (
         <>
-          {/* Plan Filter Toolbar */}
           <div className="catalog-toolbar">
             <div className="catalog-filters">
               <input
@@ -1116,7 +1458,6 @@ export function CatalogPage() {
             </div>
           </div>
 
-          {/* Plans list states */}
           {plansLoading ? (
             <div className="panel empty-state">
               <span className="empty-symbol">⏳</span>
@@ -1233,7 +1574,6 @@ export function CatalogPage() {
                 </table>
               </div>
 
-              {/* Pagination */}
               <div className="catalog-pagination">
                 <div>
                   Showing page <strong>{planPage}</strong> of <strong>{planTotalPages}</strong> ({planTotal} total plans)
@@ -1267,7 +1607,6 @@ export function CatalogPage() {
       {/* --------------------------------------------------------------------- */}
       {activeTab === 'taxes' && (
         <>
-          {/* Policy Information Box */}
           <div style={{ background: '#f8fafc', padding: '14px 18px', borderRadius: '8px', border: '1px solid var(--border)', fontSize: '0.85rem' }}>
             <strong>Tax Rule Rate Policy:</strong>
             <p className="muted" style={{ margin: '4px 0 0' }}>
@@ -1277,7 +1616,6 @@ export function CatalogPage() {
             </p>
           </div>
 
-          {/* Tax Filter Toolbar */}
           <div className="catalog-toolbar">
             <div className="catalog-filters">
               <input
@@ -1319,7 +1657,6 @@ export function CatalogPage() {
             </div>
           </div>
 
-          {/* Taxes list states */}
           {taxesLoading ? (
             <div className="panel empty-state">
               <span className="empty-symbol">⏳</span>
@@ -1409,7 +1746,6 @@ export function CatalogPage() {
                 </table>
               </div>
 
-              {/* Pagination */}
               <div className="catalog-pagination">
                 <div>
                   Showing page <strong>{taxPage}</strong> of <strong>{taxTotalPages}</strong> ({taxTotal} total tax rules)
@@ -1428,6 +1764,220 @@ export function CatalogPage() {
                     className="catalog-btn catalog-btn-secondary catalog-btn-small"
                     disabled={taxPage >= taxTotalPages}
                     onClick={() => setTaxPage(p => Math.min(taxTotalPages, p + 1))}
+                  >
+                    Next
+                  </button>
+                </div>
+              </div>
+            </>
+          )}
+        </>
+      )}
+
+      {/* --------------------------------------------------------------------- */}
+      {/* TAB 4: DISCOUNT RULES (Step 5)                                        */}
+      {/* --------------------------------------------------------------------- */}
+      {activeTab === 'discounts' && (
+        <>
+          <div style={{ background: '#f8fafc', padding: '14px 18px', borderRadius: '8px', border: '1px solid var(--border)', fontSize: '0.85rem' }}>
+            <strong>Deterministic Single-Discount Policy:</strong>
+            <p className="muted" style={{ margin: '4px 0 0' }}>
+              Discounts are never stacked. On invoice confirmation, the system deterministically selects the single eligible active rule that produces the largest monetary savings.
+              Product-scoped discounts require a valid product link; subscription-scoped discounts apply across the whole invoice.
+            </p>
+          </div>
+
+          <div className="catalog-toolbar">
+            <div className="catalog-filters">
+              <input
+                type="search"
+                placeholder="Search discount rules by name..."
+                className="catalog-search-input"
+                value={discountSearch}
+                onChange={(e) => {
+                  setDiscountSearch(e.target.value);
+                  setDiscountPage(1);
+                }}
+              />
+              <select
+                className="catalog-select"
+                value={discountScopeFilter}
+                onChange={(e) => {
+                  setDiscountScopeFilter(e.target.value);
+                  setDiscountPage(1);
+                }}
+              >
+                <option value="">All Scopes</option>
+                <option value="SUBSCRIPTION">Whole Subscription</option>
+                <option value="PRODUCT">Product Specific</option>
+              </select>
+              <select
+                className="catalog-select"
+                value={discountKindFilter}
+                onChange={(e) => {
+                  setDiscountKindFilter(e.target.value);
+                  setDiscountPage(1);
+                }}
+              >
+                <option value="">All Types</option>
+                <option value="PERCENTAGE">Percentage (%)</option>
+                <option value="FIXED">Fixed Amount (₹)</option>
+              </select>
+              <select
+                className="catalog-select"
+                value={discountStatusFilter}
+                onChange={(e) => {
+                  setDiscountStatusFilter(e.target.value);
+                  setDiscountPage(1);
+                }}
+              >
+                <option value="">All Statuses</option>
+                <option value="active">Active Only</option>
+                <option value="inactive">Archived Only</option>
+              </select>
+            </div>
+            <div>
+              <select
+                className="catalog-select"
+                value={discountPageSize}
+                onChange={(e) => {
+                  setDiscountPageSize(Number(e.target.value));
+                  setDiscountPage(1);
+                }}
+              >
+                <option value="10">10 per page</option>
+                <option value="20">20 per page</option>
+                <option value="50">50 per page</option>
+              </select>
+            </div>
+          </div>
+
+          {discountsLoading ? (
+            <div className="panel empty-state">
+              <span className="empty-symbol">⏳</span>
+              <h2>Loading discount rules...</h2>
+              <p className="muted">Fetching discount configurations, thresholds, and usage limits.</p>
+            </div>
+          ) : discountsError ? (
+            <div className="panel alert-error">
+              <div><strong>Unable to load discounts:</strong> {discountsError}</div>
+              <button
+                type="button"
+                className="catalog-btn catalog-btn-secondary catalog-btn-small"
+                onClick={loadDiscounts}
+              >
+                Retry
+              </button>
+            </div>
+          ) : discounts.length === 0 ? (
+            <div className="panel empty-state">
+              <span className="empty-symbol">🏷️</span>
+              <h2>No discount rules found</h2>
+              <p className="muted">Create your first fixed or percentage promotional discount rule.</p>
+              <div style={{ marginTop: '18px' }}>
+                <button type="button" className="catalog-btn catalog-btn-primary" onClick={openCreateDiscount}>
+                  + Create First Discount
+                </button>
+              </div>
+            </div>
+          ) : (
+            <>
+              <div className="catalog-table-wrapper">
+                <table className="catalog-table">
+                  <thead>
+                    <tr>
+                      <th>Rule Name & Scope</th>
+                      <th>Type & Savings Value</th>
+                      <th>Thresholds</th>
+                      <th>Validity Period</th>
+                      <th>Uses / Limit</th>
+                      <th>Status</th>
+                      <th style={{ textAlign: 'right' }}>Actions</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {discounts.map((discount) => {
+                      const isPct = discount.kind === 'PERCENTAGE';
+                      const valFormatted = isPct
+                        ? `${(discount.value / 100).toFixed(discount.value % 100 === 0 ? 0 : 2)}% (${discount.value} bps)`
+                        : `${formatMoney(discount.value)} (${discount.value} paise)`;
+
+                      return (
+                        <tr key={discount.id}>
+                          <td>
+                            <strong>{discount.name}</strong>
+                            <div style={{ marginTop: '4px' }}>
+                              <span className="type-pill" style={{ fontSize: '0.7rem' }}>
+                                {discount.scope === 'PRODUCT'
+                                  ? `Product: ${discount.product?.name || 'Selected Item'}`
+                                  : 'Whole Subscription'}
+                              </span>
+                            </div>
+                          </td>
+                          <td>
+                            <span className="type-pill" style={{ background: '#eaf4e9', color: '#17674f', fontWeight: 700 }}>
+                              {valFormatted}
+                            </span>
+                          </td>
+                          <td style={{ fontSize: '0.82rem' }}>
+                            <div>Min Purchase: {formatMoney(discount.minimumPurchaseMinor)}</div>
+                            <div className="muted">Min Qty: {discount.minimumQuantity} units</div>
+                          </td>
+                          <td className="muted" style={{ fontSize: '0.82rem' }}>
+                            {discount.startsAt.slice(0, 10)} → {discount.endsAt ? discount.endsAt.slice(0, 10) : 'Ongoing'}
+                          </td>
+                          <td style={{ fontSize: '0.85rem' }}>
+                            <strong>{discount.uses}</strong> / {discount.usageLimit !== null ? discount.usageLimit : '∞'}
+                          </td>
+                          <td>
+                            <span className={`status-pill ${discount.isActive ? 'active' : 'inactive'}`}>
+                              ● {discount.isActive ? 'Active' : 'Archived'}
+                            </span>
+                          </td>
+                          <td style={{ textAlign: 'right' }}>
+                            <div style={{ display: 'inline-flex', gap: '6px' }}>
+                              <button
+                                type="button"
+                                className="catalog-btn catalog-btn-secondary catalog-btn-small"
+                                onClick={() => openEditDiscount(discount)}
+                              >
+                                Edit
+                              </button>
+                              <button
+                                type="button"
+                                className="catalog-btn catalog-btn-secondary catalog-btn-small"
+                                onClick={() => toggleDiscountArchive(discount)}
+                                title={discount.isActive ? 'Archive discount to preserve history' : 'Restore discount to active'}
+                              >
+                                {discount.isActive ? 'Archive' : 'Restore'}
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+
+              <div className="catalog-pagination">
+                <div>
+                  Showing page <strong>{discountPage}</strong> of <strong>{discountTotalPages}</strong> ({discountTotal} total discount rules)
+                </div>
+                <div className="pagination-controls">
+                  <button
+                    type="button"
+                    className="catalog-btn catalog-btn-secondary catalog-btn-small"
+                    disabled={discountPage <= 1}
+                    onClick={() => setDiscountPage(p => Math.max(1, p - 1))}
+                  >
+                    Previous
+                  </button>
+                  <button
+                    type="button"
+                    className="catalog-btn catalog-btn-secondary catalog-btn-small"
+                    disabled={discountPage >= discountTotalPages}
+                    onClick={() => setDiscountPage(p => Math.min(discountTotalPages, p + 1))}
                   >
                     Next
                   </button>
@@ -1698,7 +2248,6 @@ export function CatalogPage() {
                 Availability dates restrict when customers can subscribe, distinct from ongoing subscription expiration.
               </span>
 
-              {/* Step 3 Lifecycle Controls */}
               <div style={{ background: '#f8fafc', padding: '12px 16px', borderRadius: '8px', border: '1px solid var(--border)', marginTop: '8px' }}>
                 <span style={{ fontSize: '0.8rem', fontWeight: 700, color: 'var(--dark)', display: 'block', marginBottom: '8px' }}>
                   Subscription Lifecycle Enforcement
@@ -1820,6 +2369,189 @@ export function CatalogPage() {
                 <button type="button" className="catalog-btn catalog-btn-secondary" onClick={() => setTaxModalMode(null)} disabled={submitting}>Cancel</button>
                 <button type="submit" className="catalog-btn catalog-btn-primary" disabled={submitting}>
                   {submitting ? 'Saving...' : taxModalMode === 'create' ? 'Create Tax Rule' : 'Update Tax Rule'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* --------------------------------------------------------------------- */}
+      {/* MODAL: CREATE / EDIT DISCOUNT RULE (Step 5)                           */}
+      {/* --------------------------------------------------------------------- */}
+      {discountModalMode && (
+        <div className="catalog-modal-backdrop" onClick={() => setDiscountModalMode(null)}>
+          <div className="catalog-modal" onClick={(e) => e.stopPropagation()}>
+            <div className="catalog-modal-header">
+              <h2>{discountModalMode === 'create' ? 'Create Discount Rule' : `Edit Discount: ${editingDiscount?.name}`}</h2>
+              <button type="button" className="catalog-close-btn" onClick={() => setDiscountModalMode(null)}>×</button>
+            </div>
+            <form onSubmit={handleDiscountSubmit} className="catalog-form">
+              {formError && <div className="alert-error">{formError}</div>}
+
+              <div className="form-group">
+                <label>Discount Rule Name *</label>
+                <input
+                  type="text"
+                  required
+                  placeholder="e.g. Early Adopter 10% Off, Launch ₹500 Voucher"
+                  className="form-input"
+                  value={discountFormData.name}
+                  onChange={(e) => setDiscountFormData({ ...discountFormData, name: e.target.value })}
+                  autoFocus
+                />
+              </div>
+
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Discount Kind *</label>
+                  <select
+                    className="form-select"
+                    value={discountFormData.kind}
+                    onChange={(e) => setDiscountFormData({ ...discountFormData, kind: e.target.value as any })}
+                  >
+                    <option value="PERCENTAGE">Percentage (%)</option>
+                    <option value="FIXED">Fixed Amount (₹)</option>
+                  </select>
+                </div>
+
+                <div className="form-group">
+                  <label>
+                    {discountFormData.kind === 'PERCENTAGE' ? 'Discount Rate (%) *' : 'Discount Amount (₹) *'}
+                  </label>
+                  <input
+                    type="number"
+                    step={discountFormData.kind === 'PERCENTAGE' ? '0.01' : '0.01'}
+                    min="0"
+                    max={discountFormData.kind === 'PERCENTAGE' ? '100' : undefined}
+                    required
+                    className="form-input"
+                    value={discountFormData.value}
+                    onChange={(e) => setDiscountFormData({ ...discountFormData, value: e.target.value })}
+                  />
+                  <span className="form-help">
+                    {discountFormData.kind === 'PERCENTAGE'
+                      ? `Stored as basis points: ${Math.round((parseFloat(discountFormData.value) || 0) * 100)} bps`
+                      : `Stored as paise: ${Math.round((parseFloat(discountFormData.value) || 0) * 100)} paise`}
+                  </span>
+                </div>
+              </div>
+
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Scope *</label>
+                  <select
+                    className="form-select"
+                    value={discountFormData.scope}
+                    onChange={(e) => setDiscountFormData({ ...discountFormData, scope: e.target.value as any })}
+                  >
+                    <option value="SUBSCRIPTION">Whole Subscription</option>
+                    <option value="PRODUCT">Specific Product</option>
+                  </select>
+                </div>
+
+                {discountFormData.scope === 'PRODUCT' ? (
+                  <div className="form-group">
+                    <label>Target Product *</label>
+                    <select
+                      className="form-select"
+                      required
+                      value={discountFormData.productId}
+                      onChange={(e) => setDiscountFormData({ ...discountFormData, productId: e.target.value })}
+                    >
+                      <option value="">Select a product...</option>
+                      {products.map(p => (
+                        <option key={p.id} value={p.id}>{p.name} ({formatMoney(p.salesPriceMinor)})</option>
+                      ))}
+                    </select>
+                  </div>
+                ) : (
+                  <div className="form-group" style={{ justifyContent: 'center' }}>
+                    <span className="form-help" style={{ marginTop: '22px' }}>
+                      Applies to overall invoice subtotal across all eligible subscription lines.
+                    </span>
+                  </div>
+                )}
+              </div>
+
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Minimum Purchase (₹)</label>
+                  <input
+                    type="number"
+                    step="0.01"
+                    min="0"
+                    className="form-input"
+                    value={discountFormData.minimumPurchase}
+                    onChange={(e) => setDiscountFormData({ ...discountFormData, minimumPurchase: e.target.value })}
+                  />
+                  <span className="form-help">0 = No minimum purchase threshold</span>
+                </div>
+
+                <div className="form-group">
+                  <label>Minimum Quantity</label>
+                  <input
+                    type="number"
+                    min="1"
+                    className="form-input"
+                    value={discountFormData.minimumQuantity}
+                    onChange={(e) => setDiscountFormData({ ...discountFormData, minimumQuantity: parseInt(e.target.value, 10) || 1 })}
+                  />
+                  <span className="form-help">Minimum quantity required to qualify</span>
+                </div>
+              </div>
+
+              <div className="form-row">
+                <div className="form-group">
+                  <label>Starts At *</label>
+                  <input
+                    type="date"
+                    required
+                    className="form-input"
+                    value={discountFormData.startsAt}
+                    onChange={(e) => setDiscountFormData({ ...discountFormData, startsAt: e.target.value })}
+                  />
+                </div>
+
+                <div className="form-group">
+                  <label>Ends At (Optional)</label>
+                  <input
+                    type="date"
+                    className="form-input"
+                    value={discountFormData.endsAt}
+                    onChange={(e) => setDiscountFormData({ ...discountFormData, endsAt: e.target.value })}
+                  />
+                </div>
+              </div>
+
+              <div className="form-group">
+                <label>Usage Limit (Optional)</label>
+                <input
+                  type="number"
+                  min="1"
+                  placeholder="Leave empty for unlimited redemptions"
+                  className="form-input"
+                  value={discountFormData.usageLimit}
+                  onChange={(e) => setDiscountFormData({ ...discountFormData, usageLimit: e.target.value })}
+                />
+                <span className="form-help">Total number of times this rule can be redeemed across all customers</span>
+              </div>
+
+              <div className="form-group">
+                <label className="form-checkbox-label">
+                  <input
+                    type="checkbox"
+                    checked={discountFormData.isActive}
+                    onChange={(e) => setDiscountFormData({ ...discountFormData, isActive: e.target.checked })}
+                  />
+                  <span>Discount rule is active and eligible for invoice evaluation</span>
+                </label>
+              </div>
+
+              <div className="catalog-modal-actions">
+                <button type="button" className="catalog-btn catalog-btn-secondary" onClick={() => setDiscountModalMode(null)} disabled={submitting}>Cancel</button>
+                <button type="submit" className="catalog-btn catalog-btn-primary" disabled={submitting}>
+                  {submitting ? 'Saving...' : discountModalMode === 'create' ? 'Create Discount Rule' : 'Update Discount Rule'}
                 </button>
               </div>
             </form>
