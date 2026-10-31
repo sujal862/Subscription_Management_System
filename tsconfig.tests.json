@@ -1,5 +1,5 @@
 {
   "extends": "./tsconfig.server.json",
-  "compilerOptions": { "noEmit": true },
-  "include": ["tests/**/*.ts", "server/src/**/*.ts", "shared/**/*.ts"]
+  "compilerOptions": { "noEmit": true, "jsx": "react-jsx", "module": "ESNext", "moduleResolution": "Bundler" },
+  "include": ["tests/**/*.ts", "tests/**/*.tsx", "server/src/**/*.ts", "shared/**/*.ts"]
 }

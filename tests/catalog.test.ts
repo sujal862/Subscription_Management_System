@@ -295,4 +295,3 @@ test('catalog step 1: database-backed product management in isolation', async t 
     rmdirSync(directory);
   }
 });
-
