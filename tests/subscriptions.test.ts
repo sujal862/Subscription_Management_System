@@ -35,7 +35,7 @@ test('customer and subscription draft API with isolated SQLite', async t => {
     const result = await response.json(); assert.equal(response.status, expected, JSON.stringify(result)); return result.data;
   }
   try {
-    await t.test('production role gate remains fail closed', async () => { await request('/guarded/customers', 'GET', undefined, 501); });
+    await t.test('production role gate rejects unauthenticated callers', async () => { await request('/guarded/customers', 'GET', undefined, 401); });
     let customer: any, second: any;
     await t.test('create, normalize, validate and deduplicate customers', async () => {
       customer = await request('/subscriptions/customers', 'POST', { name: '  Acme  ', email: ' CONTACT@ACME.COM ', company: ' Acme Inc ' }, 201);
