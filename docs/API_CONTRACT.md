@@ -47,6 +47,7 @@ follow their owners' progress; route listings alone do not indicate completion.
 | GET /staff | ADMIN; Page<PublicUser>, query page/pageSize/search |
 | POST /staff | ADMIN; {name,email,password} -> 201 PublicUser, role fixed to STAFF |
 | GET /dashboard/summary | DashboardSummary from shared/contracts.ts |
+| GET /dashboard/overdue | Page<DashboardOverdueInvoice>; same filters plus page/pageSize |
 
 Public auth page routes: /account/login, /account/signup,
 /account/forgot-password, /account/reset-password.
@@ -69,6 +70,30 @@ Summary: exclude draft/cancelled invoices. Revenue is confirmed/paid pre-tax net
 invoiced amount; collected is payments against those invoices; outstanding is
 sum of remaining balances; overdue is remaining balances past dueDate. Add date
 filters with explicit semantics in step 5 and coordinate optional contract fields.
+
+Implemented dashboard filters: optional `from` and `to` valid YYYY-MM-DD calendar
+days (1900-9998), inclusive in Asia/Kolkata, filtering Invoice.issuedAt. Optional
+`status=CONFIRMED|PAID`; omitted includes both. Draft/cancelled status filters are
+rejected because they cannot contribute to accounting totals. Unknown fields and
+reversed ranges are rejected. Summary additionally returns `invoiceCount` and
+`asOf` (UTC instant). `activeSubscriptions` is the current ACTIVE count across all
+subscriptions, independent of invoice filters. This is not a historical ledger.
+Revenue = SUM(subtotalMinor - discountMinor); collected = all recorded payments
+against selected invoices, irrespective of paidAt. Balances include tax and clamp
+remaining amounts to zero per invoice. Overdue requires dueDate strictly before
+asOf and a positive remaining balance. Payment/invoice edits are reflected live;
+date filters do not rewind later payments. Revenue and collected are different bases.
+Overdue rows expose id, number, customerName, dueDate, totalMinor, paidMinor,
+outstandingMinor. Page default 1, max 100000; pageSize default 20, max 100.
+Both endpoints are ADMIN/STAFF only, use DB aggregation and stable dueDate/id ordering.
+Index migration `20261031090000_dashboard_index` adds Invoice(status,issuedAt).
+
+Hour 6 integration: POST /billing/run now validates a timezone-bearing ISO datetime,
+nonempty subscriptionId and maxCatchUpCycles 1-100. Per-subscription API errors are
+sanitized; the engine and module-owned lifecycle behavior are preserved.
+Payment recording also validates paidAt as a timezone-bearing ISO datetime, method
+1-50 chars, note up to 2000, reference up to 200, integer amount 1-2147483647 paise,
+and rejects unknown input fields. Existing UI ISO timestamps remain compatible.
 
 ## Member 2, under /catalog
 
