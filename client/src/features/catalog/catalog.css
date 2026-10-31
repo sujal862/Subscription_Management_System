@@ -452,3 +452,4 @@
     grid-template-columns: 1fr;
   }
 }
+.catalog-container [hidden] { display: none !important; }

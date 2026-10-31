@@ -33,6 +33,9 @@ playwright-report/
 .local/
 *.log
 
+# Local team planning prompts
+/docs/prompts/
+
 # Editor temporary files and operating-system metadata
 *.swp
 *.swo

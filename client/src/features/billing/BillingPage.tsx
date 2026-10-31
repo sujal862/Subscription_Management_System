@@ -68,6 +68,7 @@ interface InvoicesResponse {
 }
 
 interface BillingRunResponse {
+  hasMore: boolean;
   targetDate: string;
   processedSubscriptions: number;
   invoicesCreated: number;
@@ -222,11 +223,11 @@ export function BillingPage() {
   const handleSendInvoice = async (id: string) => {
     setSendingEmail(true);
     try {
-      const res = await api<{ sent: boolean; sentAt: string; recipient: string }>(
+      const res = await api<{ sent: boolean; sentAt: string; recipient: string; deliveryMode: 'file' | 'smtp' }>(
         `/billing/invoices/${id}/send`,
         { method: 'POST' }
       );
-      alert(`✓ Invoice successfully sent to ${res.recipient}!`);
+      alert(res.deliveryMode === 'file' ? 'Invoice email saved to the private offline outbox. No email was sent to an inbox.' : `Invoice email sent through SMTP to ${res.recipient}.`);
       const updated = await api<InvoiceItem>(`/billing/invoices/${id}`);
       setSelectedInvoice(updated);
       await fetchInvoices();
@@ -248,7 +249,7 @@ export function BillingPage() {
         }),
       });
       setRunMessage(
-        `✓ Billing cycle processed: ${res.processedSubscriptions} subscriptions checked, ${res.invoicesCreated} invoices created, ${res.skippedDuplicates} duplicates skipped.`
+        `Billing cycle processed: ${res.processedSubscriptions} subscriptions checked, ${res.invoicesCreated} invoices created, ${res.skippedDuplicates} duplicates skipped. ${res.errors.length} failed.${res.hasMore ? ' More periods remain; run again to continue catch-up.' : ''}`
       );
       setShowRunModal(false);
       await fetchInvoices();
@@ -487,6 +488,7 @@ export function BillingPage() {
             </div>
 
             <div className="modal-body">
+              <div className="invoice-print-heading"><h1>Brightloop</h1><h2>Invoice {selectedInvoice.number}</h2><p>Status: {selectedInvoice.status}</p></div>
               <div className="snapshot-grid">
                 <div className="snapshot-item">
                   <h4>Customer Snapshot</h4>
@@ -576,8 +578,8 @@ export function BillingPage() {
                       <tr>
                         <th>Date</th>
                         <th>Method</th>
-                        <th>Reference</th>
-                        <th>Note</th>
+                        <th className="no-print">Reference</th>
+                        <th className="no-print">Note</th>
                         <th>Amount</th>
                       </tr>
                     </thead>
@@ -586,8 +588,8 @@ export function BillingPage() {
                         <tr key={p.id}>
                           <td>{new Date(p.paidAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })}</td>
                           <td><strong>{p.method}</strong></td>
-                          <td>{p.reference || <span className="muted">—</span>}</td>
-                          <td>{p.note || <span className="muted">—</span>}</td>
+                          <td className="no-print">{p.reference || <span className="muted">—</span>}</td>
+                          <td className="no-print">{p.note || <span className="muted">—</span>}</td>
                           <td style={{ color: '#03543f', fontWeight: 600 }}>{formatMoney(p.amountMinor)}</td>
                         </tr>
                       ))}

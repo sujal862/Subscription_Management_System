@@ -1,30 +1,37 @@
 import { runBillingCycle, type BillingRunResult } from './recurring.js';
+import { processSubscriptionLifecycle } from '../subscriptions/lifecycle.js';
 
 let timer: ReturnType<typeof setInterval> | undefined;
 let isRunning = false;
+let pending: Promise<BillingRunResult | null> | undefined;
 
 /**
  * Executes a single recurring billing cycle run safely, preventing overlapping runs.
  */
-export async function runScheduledBillingCycle(): Promise<BillingRunResult | null> {
+export function runScheduledBillingCycle(): Promise<BillingRunResult | null> {
   if (isRunning) {
-    return null; // Skip if a cycle is already currently running
+    return Promise.resolve(null); // Skip if a cycle is already currently running
   }
 
   isRunning = true;
-  try {
+  pending = (async () => { try {
+    await processSubscriptionLifecycle();
     const result = await runBillingCycle();
+    await processSubscriptionLifecycle();
     if (result.invoicesCreated > 0 || result.errors.length > 0) {
       console.log(`[Billing Scheduler] Created ${result.invoicesCreated} invoices, skipped ${result.skippedDuplicates} duplicates.`);
     }
     return result;
   } catch (error) {
-    console.error('[Billing Scheduler] Error executing recurring billing cycle:', error);
+    console.error('[Billing Scheduler] Cycle failed; it will retry on the next run.');
     return null;
   } finally {
     isRunning = false;
-  }
+    pending = undefined;
+  } })();
+  return pending;
 }
+export async function waitForBillingScheduler() { await pending; }
 
 /**
  * Starts the recurring billing scheduler and performs an immediate catch-up cycle on startup.

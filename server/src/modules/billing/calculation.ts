@@ -45,12 +45,15 @@ export function calculateLine(input: LineCalculationInput): CalculatedLine {
     throw new Error('Tax rate bps must be an integer between 0 and 10000');
   }
 
-  const subtotalMinor = input.quantity * input.unitPriceMinor;
+  if (!Number.isSafeInteger(input.quantity) || !Number.isSafeInteger(input.unitPriceMinor)) throw new Error('Amounts must be safe integers');
+  const subtotal = BigInt(input.quantity) * BigInt(input.unitPriceMinor);
   const rawDiscount = input.discountMinor ?? 0;
+  if (!Number.isSafeInteger(rawDiscount)) throw new Error('Discount must be an integer in paise');
+  const subtotalMinor = boundedMoney(subtotal);
   const discountMinor = Math.min(subtotalMinor, Math.max(0, rawDiscount));
   const taxableBaseMinor = subtotalMinor - discountMinor;
-  const taxMinor = Math.round((taxableBaseMinor * input.taxRateBps) / 10000);
-  const amountMinor = taxableBaseMinor + taxMinor;
+  const taxMinor = boundedMoney((BigInt(taxableBaseMinor) * BigInt(input.taxRateBps) + 5000n) / 10000n);
+  const amountMinor = boundedMoney(BigInt(taxableBaseMinor) + BigInt(taxMinor));
 
   return {
     quantity: input.quantity,
@@ -73,6 +76,7 @@ export function calculateInvoice(linesInput: LineCalculationInput[]): InvoiceCal
   const discountMinor = lines.reduce((acc, l) => acc + l.discountMinor, 0);
   const taxMinor = lines.reduce((acc, l) => acc + l.taxMinor, 0);
   const totalMinor = subtotalMinor - discountMinor + taxMinor;
+  boundedMoney(BigInt(subtotalMinor)); boundedMoney(BigInt(totalMinor));
 
   return {
     subtotalMinor,
@@ -81,4 +85,9 @@ export function calculateInvoice(linesInput: LineCalculationInput[]): InvoiceCal
     totalMinor,
     lines,
   };
+}
+
+function boundedMoney(value: bigint) {
+  if (value < 0n || value > 2147483647n) throw new Error('Invoice amount exceeds supported monetary range');
+  return Number(value);
 }

@@ -138,15 +138,15 @@ export function CustomerInvoicesPage() {
 
       <div className="billing-stats-grid no-print">
         <div className="stat-card">
-          <span className="stat-label">Total Invoiced</span>
+          <span className="stat-label">Total Invoiced (Page)</span>
           <span className="stat-value">{formatMoney(totalInvoiced)}</span>
         </div>
         <div className="stat-card">
-          <span className="stat-label">Total Paid</span>
+          <span className="stat-label">Total Paid (Page)</span>
           <span className="stat-value" style={{ color: '#03543f' }}>{formatMoney(totalPaid)}</span>
         </div>
         <div className="stat-card">
-          <span className="stat-label">Outstanding Balance</span>
+          <span className="stat-label">Outstanding Balance (Page)</span>
           <span
             className="stat-value"
             style={{ color: totalOutstanding > 0 ? '#b91c1c' : '#03543f' }}

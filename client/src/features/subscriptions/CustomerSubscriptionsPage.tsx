@@ -4,6 +4,7 @@ import { subscriptionStatuses, type Page } from '../../../../shared/contracts';
 import { formatMoney } from '../../../../shared/money';
 import { LifecycleActions } from './LifecycleActions';
 import { businessDate, type PortalSubscriptionSummary, type PortalSubscriptionDetail } from './types';
+import { useDetailFocus } from './useDetailFocus';
 import './subscriptions.css';
 
 export function CustomerSubscriptionsPage() {
@@ -17,6 +18,7 @@ export function CustomerSubscriptionsPage() {
   const [detail, setDetail] = useState<PortalSubscriptionDetail | null>(null);
   const [loadingDetail, setLoadingDetail] = useState(false);
   const [notice, setNotice] = useState('');
+  const detailRef = useDetailFocus(loadingDetail ? 'loading' : detailError ? `error:${detailError}` : detail ? `subscription:${detail.id}` : null);
   const detailRequest = useRef<AbortController | null>(null);
   useEffect(() => () => detailRequest.current?.abort(), []);
   useEffect(() => {
@@ -44,8 +46,8 @@ export function CustomerSubscriptionsPage() {
         {!result.items.length && <div className="sub-empty"><h2>No subscriptions found</h2><p>{search || status ? 'Try changing your search or status filter.' : 'Your subscriptions will appear here when your account has a plan.'}</p></div>}
         <div className="sub-pager"><span>{result.total} subscriptions · Page {page} of {Math.max(1, Math.ceil(result.total / result.pageSize))}</span><div className="sub-actions"><button className="sub-secondary" disabled={page === 1} onClick={() => setPage(page - 1)}>Previous subscriptions</button><button className="sub-secondary" disabled={page * result.pageSize >= result.total} onClick={() => setPage(page + 1)}>Next subscriptions</button></div></div></>}
     </section>
-    {loadingDetail && <p role="status">Loading subscription details…</p>}{detailError && <p className="sub-error" role="alert">{detailError}</p>}
-    {detail && <section className="panel sub-editor" aria-label="Your subscription details"><div className="sub-section-heading"><h2>{detail.number}</h2><button className="sub-secondary" onClick={() => setDetail(null)}>Close subscription details</button></div><p>{detail.plan.name} · Payment terms: {detail.paymentTermDays} days</p>
+    {loadingDetail && <p ref={detailRef} tabIndex={-1} className="sub-detail-target" role="status">Loading subscription details…</p>}{detailError && <p ref={detailRef} tabIndex={-1} className="sub-error sub-detail-target" role="alert">{detailError}</p>}
+    {detail && <section ref={detailRef} tabIndex={-1} className="panel sub-editor sub-detail-target" aria-label="Your subscription details"><div className="sub-section-heading"><h2>{detail.number}</h2><button className="sub-secondary" onClick={() => setDetail(null)}>Close subscription details</button></div><p>{detail.plan.name} · Payment terms: {detail.paymentTermDays} days</p>
       <LifecycleActions key={detail.id} portal detail={detail} onSaved={(value, renewed) => { setDetail(value); setNotice(renewed ? `Renewal ${value.number} created. Our team will review the new draft.` : `Subscription ${value.number} is now ${value.status.toLowerCase()}.`); setPage(1); setRevision(current => current + 1); }} />
       <div className="sub-portal-lines">{detail.lines.map(line => <article key={line.id}><h3>{line.description}</h3><p>{line.quantity} × {formatMoney(line.unitPriceMinor)} · Tax {line.taxRateBps / 100}% ({formatMoney(line.taxMinor)})</p><strong>{formatMoney(line.totalMinor)}</strong></article>)}</div><p className="sub-summary">Subtotal {formatMoney(detail.subtotalMinor)} · Tax {formatMoney(detail.taxMinor)} · Total {formatMoney(detail.totalMinor)}</p>
     </section>}

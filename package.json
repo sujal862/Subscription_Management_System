@@ -9,7 +9,7 @@
   "scripts": {
     "setup": "node scripts/setup.mjs",
     "dev": "concurrently -k -n API,WEB -c cyan,magenta \"npm:dev:server\" \"npm:dev:client\"",
-    "dev:server": "tsx watch server/src/index.ts",
+    "dev:server": "node --watch --import tsx server/src/index.ts",
     "dev:client": "vite --config client/vite.config.ts",
     "typecheck": "tsc --noEmit -p tsconfig.server.json && tsc --noEmit -p client/tsconfig.json && tsc -p tsconfig.tests.json",
     "build": "tsc -p tsconfig.server.json && vite build --config client/vite.config.ts",

@@ -4,6 +4,7 @@ import cookieParser from 'cookie-parser';
 import path from 'node:path';
 import { existsSync } from 'node:fs';
 import { ZodError } from 'zod';
+import { Prisma } from '@prisma/client';
 import { config } from './lib/config.js';
 import { db } from './lib/db.js';
 import { HttpError, asyncRoute } from './lib/http.js';
@@ -45,6 +46,11 @@ if (config.production && existsSync(clientDirectory)) {
 const errorHandler: ErrorRequestHandler = (error, _req, res, _next) => {
   if (error instanceof ZodError) return void res.status(400).json({ error: { code: 'VALIDATION_ERROR', message: 'Invalid input', details: error.issues } });
   if (error instanceof HttpError) return void res.status(error.status).json({ error: { code: error.code, message: error.message } });
+  if (error instanceof Prisma.PrismaClientKnownRequestError) {
+    if (error.code === 'P2002') return void res.status(409).json({ error: { code: 'CONFLICT', message: 'A record with those details already exists.' } });
+    if (['P2025', 'P2034', 'P1008'].includes(error.code)) return void res.status(409).json({ error: { code: 'RETRY_OPERATION', message: 'The record changed or another operation is in progress. Refresh and retry.' } });
+    if (error.code === 'P2003') return void res.status(409).json({ error: { code: 'RECORD_REFERENCED', message: 'This record is referenced by other data and cannot be removed.' } });
+  }
   if (error instanceof SyntaxError && 'body' in error) return void res.status(400).json({ error: { code: 'INVALID_JSON', message: 'Request body must be valid JSON' } });
   if (error instanceof Error && 'type' in error && error.type === 'entity.too.large') return void res.status(413).json({ error: { code: 'PAYLOAD_TOO_LARGE', message: 'Request body is too large' } });
   console.error(error);

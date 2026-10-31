@@ -1,4 +1,4 @@
-import { useEffect, useState, type FormEvent } from 'react';
+import { useEffect, useRef, useState, type FormEvent } from 'react';
 import { api, ApiError, errorMessage } from '../../lib/api';
 import { subscriptionStatuses, type Page } from '../../../../shared/contracts';
 import { formatMoney } from '../../../../shared/money';
@@ -6,6 +6,7 @@ import { DraftForm } from './DraftForm';
 import { LifecycleActions, ProcessLifecycleButton } from './LifecycleActions';
 import { QuotationsPanel, QuoteDraftAction } from './QuotationsPanel';
 import { businessDate, type Customer, type Subscription, type Detail } from './types';
+import { useDetailFocus } from './useDetailFocus';
 import './subscriptions.css';
 
 const blankCustomer = { name: '', email: '', company: '', phone: '', address: '' };
@@ -52,6 +53,10 @@ export function SubscriptionsPage() {
   const [detail, setDetail] = useState<Detail | null>(null);
   const [customerDetail, setCustomerDetail] = useState<Customer | null>(null);
   const [detailError, setDetailError] = useState('');
+  const [loadingDetail, setLoadingDetail] = useState(false);
+  const detailRequest = useRef<AbortController | null>(null);
+  const detailRef = useDetailFocus(loadingDetail ? 'loading' : detailError ? `error:${detailError}` : detail ? `subscription:${detail.id}` : customerDetail ? `customer:${customerDetail.id}` : null);
+  useEffect(() => () => detailRequest.current?.abort(), []);
   const [notice, setNotice] = useState('');
   useEffect(() => {
     let active = true; setCustomers(undefined); setCustomerError('');
@@ -68,21 +73,24 @@ export function SubscriptionsPage() {
     return () => { active = false; clearTimeout(timer); };
   }, [page, search, status, customerFilter, revision]);
   async function view(id: string, customer = false) {
-    setDetailError(''); setNotice('Loading details…');
+    detailRequest.current?.abort(); const controller = new AbortController(); detailRequest.current = controller;
+    setDetailError(''); setNotice(''); setLoadingDetail(true); setDetail(null); setCustomerDetail(null);
     try {
-      if (customer) { setCustomerDetail(await api<Customer>(`/subscriptions/customers/${id}`)); setDetail(null); }
-      else { setDetail(await api<Detail>(`/subscriptions/${id}`)); setCustomerDetail(null); }
-      setNotice('');
-    } catch (error) { setDetailError(errorMessage(error)); setNotice(''); }
+      if (customer) { const value = await api<Customer>(`/subscriptions/customers/${encodeURIComponent(id)}`, { signal: controller.signal }); if (!controller.signal.aborted) setCustomerDetail(value); }
+      else { const value = await api<Detail>(`/subscriptions/${encodeURIComponent(id)}`, { signal: controller.signal }); if (!controller.signal.aborted) setDetail(value); }
+    } catch (error) { if (!controller.signal.aborted) setDetailError(errorMessage(error)); }
+    finally { if (!controller.signal.aborted) setLoadingDetail(false); }
   }
   return <div className="subscriptions-feature">
     <header className="page-heading"><div><span className="eyebrow">CUSTOMERS & SALES</span><h1>Subscription Management</h1><p className="muted">Manage customer relationships and prepare subscription drafts.</p></div><div className="sub-actions"><button className="sub-secondary" onClick={() => { setEditor('new'); setCreating(false); }}>Add Customer</button><button onClick={() => { setCreating(true); setEditor(null); }}>Create Subscription</button></div></header>
-    {notice && <p role="status" className="notice">{notice}</p>}{detailError && <Failure message={detailError} />}
+    {notice && <p role="status" className="notice">{notice}</p>}
+    {loadingDetail && <p ref={detailRef} tabIndex={-1} className="sub-detail-target" role="status">Loading details…</p>}
+    {detailError && <p ref={detailRef} tabIndex={-1} className="sub-error sub-detail-target" role="alert">{detailError}</p>}
     {editor && <CustomerForm key={editor === 'new' ? 'new' : editor.id} customer={editor === 'new' ? null : editor} onClose={() => setEditor(null)} onSaved={() => { setNotice('Customer saved.'); setEditor(null); setCustomerDetail(null); setRevision(value => value + 1); }} />}
     {creating && <DraftForm onClose={() => setCreating(false)} onSaved={value => { setCreating(false); setDetail(value); setCustomerDetail(null); setNotice(`Created ${value.number} · DRAFT`); setRevision(value => value + 1); }} />}
-    {customerDetail && <section className="panel sub-editor" aria-label="Customer details"><div className="sub-section-heading"><h2>{customerDetail.name}</h2><button className="sub-secondary" onClick={() => setCustomerDetail(null)}>Close details</button></div><dl className="sub-details">{[['Email', customerDetail.email], ['Company', customerDetail.company], ['Phone', customerDetail.phone], ['Address', customerDetail.address], ['Subscriptions', customerDetail._count.subscriptions], ['Created', businessDate(customerDetail.createdAt)]].map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value ?? '—'}</dd></div>)}</dl></section>}
-    {detail && <section className="panel sub-editor" aria-label="Subscription details"><div className="sub-section-heading"><h2>{detail.number} <span className="badge">{detail.status}</span></h2><button className="sub-secondary" onClick={() => setDetail(null)}>Close details</button></div><LifecycleActions key={`lifecycle-${detail.id}`} detail={detail} onSaved={(value, renewed) => { setDetail(value); setNotice(renewed ? `Created renewal ${value.number}` : `${value.number}: ${value.status}`); setPage(1); setRevision(current => current + 1); }} /><QuoteDraftAction key={detail.id} detail={detail} onSaved={value => { setDetail(value); setNotice(`${value.number} converted to QUOTATION.`); setPage(1); setRevision(current => current + 1); }} /><dl className="sub-details">{[['Customer', detail.customer.name], ['Email', detail.customer.email], ['Address', detail.customer.address], ['Plan', detail.plan.name], ['Billing interval', detail.billingInterval], ['Start date', businessDate(detail.startDate)], ['Expiry date', businessDate(detail.expiryDate)], ['Payment terms', `${detail.paymentTermDays} days`], ['Quotation valid until', businessDate(detail.quotationValidUntil)]].map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value ?? '—'}</dd></div>)}</dl><div className="sub-table-wrap"><table><caption>Saved product lines</caption><thead><tr><th>Description</th><th>Quantity</th><th>Unit price</th><th>Tax rate</th><th>Tax</th><th>Total</th></tr></thead><tbody>{detail.lines.map(line => <tr key={line.id}><td>{line.description}</td><td>{line.quantity}</td><td>{formatMoney(line.unitPriceMinor)}</td><td>{line.taxRateBps / 100}%</td><td>{formatMoney(line.taxMinor)}</td><td>{formatMoney(line.totalMinor)}</td></tr>)}</tbody></table></div><p className="sub-summary">Subtotal {formatMoney(detail.subtotalMinor)} · Tax {formatMoney(detail.taxMinor)} · Total {formatMoney(detail.totalMinor)}</p></section>}
-    <QuotationsPanel onCreated={value => { setDetail(value); setCustomerDetail(null); setNotice(`Created ${value.number} � QUOTATION`); setPage(1); setRevision(current => current + 1); }} />
+    {customerDetail && <section ref={detailRef} tabIndex={-1} className="panel sub-editor sub-detail-target" aria-label="Customer details"><div className="sub-section-heading"><h2>{customerDetail.name}</h2><button className="sub-secondary" onClick={() => setCustomerDetail(null)}>Close details</button></div><dl className="sub-details">{[['Email', customerDetail.email], ['Company', customerDetail.company], ['Phone', customerDetail.phone], ['Address', customerDetail.address], ['Subscriptions', customerDetail._count.subscriptions], ['Created', businessDate(customerDetail.createdAt)]].map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value ?? '—'}</dd></div>)}</dl></section>}
+    {detail && <section ref={detailRef} tabIndex={-1} className="panel sub-editor sub-detail-target" aria-label="Subscription details"><div className="sub-section-heading"><h2>{detail.number} <span className="badge">{detail.status}</span></h2><button className="sub-secondary" onClick={() => setDetail(null)}>Close details</button></div><LifecycleActions key={`lifecycle-${detail.id}`} detail={detail} onSaved={(value, renewed) => { setDetail(value); setNotice(renewed ? `Created renewal ${value.number}` : `${value.number}: ${value.status}`); setPage(1); setRevision(current => current + 1); }} /><QuoteDraftAction key={detail.id} detail={detail} onSaved={value => { setDetail(value); setNotice(`${value.number} converted to QUOTATION.`); setPage(1); setRevision(current => current + 1); }} /><dl className="sub-details">{[['Customer', detail.customer.name], ['Email', detail.customer.email], ['Address', detail.customer.address], ['Plan', detail.plan.name], ['Billing interval', detail.billingInterval], ['Start date', businessDate(detail.startDate)], ['Expiry date', businessDate(detail.expiryDate)], ['Payment terms', `${detail.paymentTermDays} days`], ['Quotation valid until', businessDate(detail.quotationValidUntil)]].map(([key, value]) => <div key={key}><dt>{key}</dt><dd>{value ?? '—'}</dd></div>)}</dl><div className="sub-table-wrap"><table><caption>Saved product lines</caption><thead><tr><th>Description</th><th>Quantity</th><th>Unit price</th><th>Tax rate</th><th>Tax</th><th>Total</th></tr></thead><tbody>{detail.lines.map(line => <tr key={line.id}><td>{line.description}</td><td>{line.quantity}</td><td>{formatMoney(line.unitPriceMinor)}</td><td>{line.taxRateBps / 100}%</td><td>{formatMoney(line.taxMinor)}</td><td>{formatMoney(line.totalMinor)}</td></tr>)}</tbody></table></div><p className="sub-summary">Subtotal {formatMoney(detail.subtotalMinor)} · Tax {formatMoney(detail.taxMinor)} · Total {formatMoney(detail.totalMinor)}</p></section>}
+    <QuotationsPanel onCreated={value => { setDetail(value); setCustomerDetail(null); setNotice(`Created ${value.number} · QUOTATION`); setPage(1); setRevision(current => current + 1); }} />
     <section className="panel"><div className="sub-section-heading"><h2>Customers</h2><button className="sub-secondary" onClick={() => setRevision(value => value + 1)}>Refresh</button></div><label className="sub-search">Search customers<input type="search" maxLength={200} placeholder="Name, email, company or phone" value={customerSearch} onChange={event => { setCustomerSearch(event.target.value); setCustomerPage(1); }} /></label>
       {customerError ? <Failure message={customerError} /> : !customers ? <Loading /> : <><div className="sub-table-wrap"><table><caption className="sub-sr-only">Customers</caption><thead><tr><th>Name / email</th><th>Company</th><th>Phone</th><th>Subscriptions</th><th>Created</th><th>Actions</th></tr></thead><tbody>{customers.items.map(customer => <tr key={customer.id}><td><strong>{customer.name}</strong><small>{customer.email}</small></td><td>{customer.company ?? '—'}</td><td>{customer.phone ?? '—'}</td><td>{customer._count.subscriptions}</td><td>{businessDate(customer.createdAt)}</td><td><div className="sub-actions"><button className="sub-secondary" onClick={() => void view(customer.id, true)}>View</button><button className="sub-secondary" onClick={() => { setEditor(customer); setCreating(false); }}>Edit</button><button className="sub-secondary" onClick={() => { setCustomerFilter(customer.id); setPage(1); }}>Subscriptions</button></div></td></tr>)}</tbody></table></div>{!customers.items.length && <p className="sub-empty">No customers found. Add a customer or adjust your search.</p>}<Pager page={customerPage} total={customers.total} setPage={setCustomerPage} /></>}
     </section>

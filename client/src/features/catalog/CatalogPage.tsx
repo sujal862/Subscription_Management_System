@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import { api, errorMessage } from '../../lib/api';
 import { formatMoney } from '../../../../shared/money';
 import type { Page } from '../../../../shared/contracts';
+import { useAuth } from '../auth/AuthContext';
 import './catalog.css';
 
 export interface ProductVariant {
@@ -182,6 +183,7 @@ const initialDiscountFormData: DiscountFormData = {
 };
 
 export function CatalogPage() {
+  const canEdit = useAuth().user?.role === 'ADMIN';
   const [activeTab, setActiveTab] = useState<'products' | 'plans' | 'taxes' | 'discounts'>('products');
 
   // Products state
@@ -949,7 +951,7 @@ export function CatalogPage() {
             <button
               type="button"
               className="catalog-btn catalog-btn-primary"
-              onClick={openCreateProduct}
+              hidden={!canEdit} onClick={openCreateProduct}
             >
               + Add Product
             </button>
@@ -969,7 +971,7 @@ export function CatalogPage() {
               <button
                 type="button"
                 className="catalog-btn catalog-btn-primary"
-                onClick={openCreatePlan}
+                hidden={!canEdit} onClick={openCreatePlan}
               >
                 + Add Plan
               </button>
@@ -979,7 +981,7 @@ export function CatalogPage() {
             <button
               type="button"
               className="catalog-btn catalog-btn-primary"
-              onClick={openCreateTax}
+              hidden={!canEdit} onClick={openCreateTax}
             >
               + Add Tax Rule
             </button>
@@ -999,7 +1001,7 @@ export function CatalogPage() {
               <button
                 type="button"
                 className="catalog-btn catalog-btn-primary"
-                onClick={openCreateDiscount}
+                hidden={!canEdit} onClick={openCreateDiscount}
               >
                 + Add Discount Rule
               </button>
@@ -1282,7 +1284,7 @@ export function CatalogPage() {
                   : 'Start building your catalog by adding your first subscription product.'}
               </p>
               <div style={{ marginTop: '18px' }}>
-                <button type="button" className="catalog-btn catalog-btn-primary" onClick={openCreateProduct}>
+                <button type="button" className="catalog-btn catalog-btn-primary" hidden={!canEdit} onClick={openCreateProduct}>
                   + Add First Product
                 </button>
               </div>
@@ -1314,8 +1316,8 @@ export function CatalogPage() {
                                 <span
                                   key={v.id}
                                   className="variant-chip"
-                                  onClick={() => openEditVariant(product, v)}
-                                  title="Click to edit variant"
+                                  onClick={canEdit ? () => openEditVariant(product, v) : undefined}
+                                  title={canEdit ? 'Click to edit variant' : 'Product variant'}
                                 >
                                   <strong>{v.name}</strong>: {v.priceAdjustmentMinor >= 0 ? '+' : ''}{formatMoney(v.priceAdjustmentMinor)}
                                   {!v.isActive && <span className="muted"> (inactive)</span>}
@@ -1325,7 +1327,7 @@ export function CatalogPage() {
                             <button
                               type="button"
                               className="add-variant-btn"
-                              onClick={() => openCreateVariant(product)}
+                              hidden={!canEdit} onClick={() => openCreateVariant(product)}
                             >
                               + Add Variant
                             </button>
@@ -1350,14 +1352,14 @@ export function CatalogPage() {
                             <button
                               type="button"
                               className="catalog-btn catalog-btn-secondary catalog-btn-small"
-                              onClick={() => openEditProduct(product)}
+                              hidden={!canEdit} onClick={() => openEditProduct(product)}
                             >
                               Edit
                             </button>
                             <button
                               type="button"
                               className="catalog-btn catalog-btn-secondary catalog-btn-small"
-                              onClick={() => toggleProductArchive(product)}
+                              hidden={!canEdit} onClick={() => toggleProductArchive(product)}
                               title={product.isActive ? 'Archive product to preserve history' : 'Restore product to active'}
                             >
                               {product.isActive ? 'Archive' : 'Restore'}
@@ -1481,7 +1483,7 @@ export function CatalogPage() {
               <h2>No recurring plans found</h2>
               <p className="muted">Create your first recurring subscription plan linked to a product.</p>
               <div style={{ marginTop: '18px' }}>
-                <button type="button" className="catalog-btn catalog-btn-primary" onClick={openCreatePlan}>
+                <button type="button" className="catalog-btn catalog-btn-primary" hidden={!canEdit} onClick={openCreatePlan}>
                   + Create First Plan
                 </button>
               </div>
@@ -1554,14 +1556,14 @@ export function CatalogPage() {
                             <button
                               type="button"
                               className="catalog-btn catalog-btn-secondary catalog-btn-small"
-                              onClick={() => openEditPlan(plan)}
+                              hidden={!canEdit} onClick={() => openEditPlan(plan)}
                             >
                               Edit
                             </button>
                             <button
                               type="button"
                               className="catalog-btn catalog-btn-secondary catalog-btn-small"
-                              onClick={() => togglePlanArchive(plan)}
+                              hidden={!canEdit} onClick={() => togglePlanArchive(plan)}
                               title={plan.isActive ? 'Archive plan to preserve history' : 'Restore plan to active'}
                             >
                               {plan.isActive ? 'Archive' : 'Restore'}
@@ -1680,7 +1682,7 @@ export function CatalogPage() {
               <h2>No tax rules found</h2>
               <p className="muted">Create your first tax rule (e.g. GST 18%, Exempt 0%, Standard 5%).</p>
               <div style={{ marginTop: '18px' }}>
-                <button type="button" className="catalog-btn catalog-btn-primary" onClick={openCreateTax}>
+                <button type="button" className="catalog-btn catalog-btn-primary" hidden={!canEdit} onClick={openCreateTax}>
                   + Create First Tax Rule
                 </button>
               </div>
@@ -1725,14 +1727,14 @@ export function CatalogPage() {
                               <button
                                 type="button"
                                 className="catalog-btn catalog-btn-secondary catalog-btn-small"
-                                onClick={() => openEditTax(tax)}
+                                hidden={!canEdit} onClick={() => openEditTax(tax)}
                               >
                                 Edit
                               </button>
                               <button
                                 type="button"
                                 className="catalog-btn catalog-btn-secondary catalog-btn-small"
-                                onClick={() => toggleTaxArchive(tax)}
+                                hidden={!canEdit} onClick={() => toggleTaxArchive(tax)}
                                 title={tax.isActive ? 'Archive tax rule to preserve subscription history' : 'Restore tax rule to active'}
                               >
                                 {tax.isActive ? 'Archive' : 'Restore'}
@@ -1875,7 +1877,7 @@ export function CatalogPage() {
               <h2>No discount rules found</h2>
               <p className="muted">Create your first fixed or percentage promotional discount rule.</p>
               <div style={{ marginTop: '18px' }}>
-                <button type="button" className="catalog-btn catalog-btn-primary" onClick={openCreateDiscount}>
+                <button type="button" className="catalog-btn catalog-btn-primary" hidden={!canEdit} onClick={openCreateDiscount}>
                   + Create First Discount
                 </button>
               </div>
@@ -1939,14 +1941,14 @@ export function CatalogPage() {
                               <button
                                 type="button"
                                 className="catalog-btn catalog-btn-secondary catalog-btn-small"
-                                onClick={() => openEditDiscount(discount)}
+                                hidden={!canEdit} onClick={() => openEditDiscount(discount)}
                               >
                                 Edit
                               </button>
                               <button
                                 type="button"
                                 className="catalog-btn catalog-btn-secondary catalog-btn-small"
-                                onClick={() => toggleDiscountArchive(discount)}
+                                hidden={!canEdit} onClick={() => toggleDiscountArchive(discount)}
                                 title={discount.isActive ? 'Archive discount to preserve history' : 'Restore discount to active'}
                               >
                                 {discount.isActive ? 'Archive' : 'Restore'}

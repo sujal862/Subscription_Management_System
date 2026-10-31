@@ -46,10 +46,10 @@ const createProductSchema = z.object({
     .default('SOFTWARE'),
   salesPriceMinor: z.number()
     .int('Sales price must be an integer paise amount')
-    .min(0, 'Sales price cannot be negative'),
+    .min(0, 'Sales price cannot be negative').max(2147483647),
   costPriceMinor: z.number()
     .int('Cost price must be an integer paise amount')
-    .min(0, 'Cost price cannot be negative')
+    .min(0, 'Cost price cannot be negative').max(2147483647)
     .default(0),
   notes: z.string().trim().max(2000, 'Notes cannot exceed 2000 characters').nullable().optional(),
   isActive: z.boolean().optional().default(true),
@@ -58,8 +58,8 @@ const createProductSchema = z.object({
 const updateProductSchema = z.object({
   name: z.string().trim().min(1, 'Product name cannot be empty').max(255).optional(),
   type: z.string().trim().min(1, 'Product type cannot be empty').optional(),
-  salesPriceMinor: z.number().int('Sales price must be an integer paise amount').min(0, 'Sales price cannot be negative').optional(),
-  costPriceMinor: z.number().int('Cost price must be an integer paise amount').min(0, 'Cost price cannot be negative').optional(),
+  salesPriceMinor: z.number().int('Sales price must be an integer paise amount').min(0, 'Sales price cannot be negative').max(2147483647).optional(),
+  costPriceMinor: z.number().int('Cost price must be an integer paise amount').min(0, 'Cost price cannot be negative').max(2147483647).optional(),
   notes: z.string().trim().max(2000).nullable().optional(),
   isActive: z.boolean().optional(),
 });
@@ -78,14 +78,14 @@ const createVariantSchema = z.object({
     .min(1, 'Variant name cannot be empty')
     .max(255, 'Variant name cannot exceed 255 characters'),
   priceAdjustmentMinor: z.number()
-    .int('Price adjustment must be an integer paise amount')
+    .int('Price adjustment must be an integer paise amount').min(-2147483648).max(2147483647)
     .default(0),
   isActive: z.boolean().optional().default(true),
 });
 
 const updateVariantSchema = z.object({
   name: z.string().trim().min(1, 'Variant name cannot be empty').max(255).optional(),
-  priceAdjustmentMinor: z.number().int('Price adjustment must be an integer paise amount').optional(),
+  priceAdjustmentMinor: z.number().int('Price adjustment must be an integer paise amount').min(-2147483648).max(2147483647).optional(),
   isActive: z.boolean().optional(),
 });
 
@@ -104,7 +104,7 @@ const createPlanSchema = z.object({
   productId: z.string().min(1, 'Product ID is required'),
   priceMinor: z.number()
     .int('Plan price must be an integer paise amount')
-    .min(0, 'Plan price cannot be negative'),
+    .min(0, 'Plan price cannot be negative').max(2147483647),
   interval: z.enum(['DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY']),
   minimumQuantity: z.number()
     .int('Minimum quantity must be an integer')
@@ -130,7 +130,7 @@ const createPlanSchema = z.object({
 const updatePlanSchema = z.object({
   name: z.string().trim().min(1, 'Plan name cannot be empty').max(255).optional(),
   productId: z.string().min(1).optional(),
-  priceMinor: z.number().int('Plan price must be an integer paise amount').min(0, 'Plan price cannot be negative').optional(),
+  priceMinor: z.number().int('Plan price must be an integer paise amount').min(0, 'Plan price cannot be negative').max(2147483647).optional(),
   interval: z.enum(['DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY']).optional(),
   minimumQuantity: z.number().int('Minimum quantity must be an integer').min(1, 'Minimum quantity must be at least 1').optional(),
   availableFrom: dateStringSchema.nullable().optional(),
@@ -185,11 +185,7 @@ const listTaxesQuerySchema = z.object({
 // Discount rule schemas (Step 5)
 // PERCENTAGE: basis points (0 to 10000; 1000 = 10%)
 // FIXED: paise (> 0)
-const isoDateTimeSchema = z.string().trim().refine(val => {
-  const d = new Date(val);
-  return Number.isFinite(d.getTime());
-}, 'Invalid date/time format')
-.transform(val => new Date(val));
+const isoDateTimeSchema = z.union([z.iso.date(), z.iso.datetime({ offset: true })]).transform(val => new Date(val));
 
 const createDiscountSchema = z.object({
   name: z.string()
@@ -200,11 +196,11 @@ const createDiscountSchema = z.object({
   scope: z.enum(['PRODUCT', 'SUBSCRIPTION'] as const),
   value: z.number()
     .int('Discount value must be an integer')
-    .min(0, 'Discount value cannot be negative'),
+    .min(0, 'Discount value cannot be negative').max(2147483647),
   productId: z.string().trim().nullable().optional(),
   minimumPurchaseMinor: z.number()
     .int('Minimum purchase must be an integer paise amount')
-    .min(0, 'Minimum purchase cannot be negative')
+    .min(0, 'Minimum purchase cannot be negative').max(2147483647)
     .default(0),
   minimumQuantity: z.number()
     .int('Minimum quantity must be an integer')
@@ -214,11 +210,11 @@ const createDiscountSchema = z.object({
   endsAt: isoDateTimeSchema.nullable().optional(),
   usageLimit: z.number()
     .int('Usage limit must be an integer')
-    .min(1, 'Usage limit must be at least 1')
+    .min(1, 'Usage limit must be at least 1').max(2147483647)
     .nullable()
     .optional(),
   isActive: z.boolean().optional().default(true),
-}).superRefine((data, ctx) => {
+}).strict().superRefine((data, ctx) => {
   if (data.kind === 'PERCENTAGE' && data.value > 10000) {
     ctx.addIssue({
       code: z.ZodIssueCode.custom,
@@ -256,15 +252,15 @@ const updateDiscountSchema = z.object({
   name: z.string().trim().min(1).max(255).optional(),
   kind: z.enum(['FIXED', 'PERCENTAGE'] as const).optional(),
   scope: z.enum(['PRODUCT', 'SUBSCRIPTION'] as const).optional(),
-  value: z.number().int().min(0).optional(),
+  value: z.number().int().min(0).max(2147483647).optional(),
   productId: z.string().trim().nullable().optional(),
-  minimumPurchaseMinor: z.number().int().min(0).optional(),
+  minimumPurchaseMinor: z.number().int().min(0).max(2147483647).optional(),
   minimumQuantity: z.number().int().min(1).optional(),
   startsAt: isoDateTimeSchema.optional(),
   endsAt: isoDateTimeSchema.nullable().optional(),
-  usageLimit: z.number().int().min(1).nullable().optional(),
+  usageLimit: z.number().int().min(1).max(2147483647).nullable().optional(),
   isActive: z.boolean().optional(),
-});
+}).strict();
 
 const listDiscountsQuerySchema = z.object({
   page: z.coerce.number().int().min(1).default(1),
@@ -282,7 +278,8 @@ const previewDiscountSchema = z.object({
     quantity: z.number().int('Quantity must be an integer').min(1, 'Quantity must be at least 1'),
     unitPriceMinor: z.number().int('Unit price must be an integer paise amount').min(0),
     taxRateBps: z.number().int().min(0).max(10000).default(0),
-  })).min(1, 'At least one line is required for eligibility preview'),
+  })).min(1, 'At least one line is required for eligibility preview').max(100).refine(lines =>
+    lines.reduce((sum, line) => sum + BigInt(line.quantity) * BigInt(line.unitPriceMinor), 0n) <= 2147483647n, 'Preview total exceeds supported monetary range'),
   periodStart: isoDateTimeSchema.optional(),
 });
 

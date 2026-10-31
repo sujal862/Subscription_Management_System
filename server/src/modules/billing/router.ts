@@ -11,6 +11,7 @@ import {
   listPaymentsForInvoice,
   getPrintableInvoice,
   sendInvoiceEmail,
+  customerInvoice,
 } from './service.js';
 import { calculateInvoice, type LineCalculationInput } from './calculation.js';
 import { runBillingCycle } from './recurring.js';
@@ -31,12 +32,12 @@ export const requireStaffOrAdmin: RequestHandler = (req, _res, next) => {
 billingRouter.use(requireStaffOrAdmin);
 
 const listInvoicesQuerySchema = z.object({
-  page: z.coerce.number().int().positive().optional().default(1),
+  page: z.coerce.number().int().positive().max(100000).optional().default(1),
   pageSize: z.coerce.number().int().positive().max(100).optional().default(20),
   status: z.enum(['DRAFT', 'CONFIRMED', 'PAID', 'CANCELLED'] as const).optional(),
   customerId: z.string().optional(),
-  overdue: z.preprocess(v => v === 'true' || v === true, z.boolean().optional()),
-});
+  overdue: z.enum(['true', 'false']).transform(value => value === 'true').optional(),
+}).strict();
 
 // GET /api/billing/invoices - Paginated invoice list with search/filters
 billingRouter.get('/invoices', asyncRoute(async (req, res) => {
@@ -185,16 +186,17 @@ billingPortalRouter.get('/', asyncRoute(async (req, res) => {
     pageSize: query.pageSize,
     status: query.status as InvoiceStatus | undefined,
     customerId, // Strictly scoped to authenticated customer!
+    overdue: query.overdue,
   });
 
-  res.json({ data: result });
+  res.json({ data: { ...result, items: result.items.map(customerInvoice) } });
 }));
 
 // GET /api/portal/invoices/:id - Customer invoice detail view
 billingPortalRouter.get('/:id', asyncRoute(async (req, res) => {
   const customerId = customerIdFor(req);
   const invoice = await getInvoiceById(req.params.id, customerId);
-  res.json({ data: invoice });
+  res.json({ data: customerInvoice(invoice) });
 }));
 
 // GET /api/portal/invoices/:id/print - Customer printable invoice
@@ -203,9 +205,3 @@ billingPortalRouter.get('/:id/print', asyncRoute(async (req, res) => {
   const result = await getPrintableInvoice(req.params.id, customerId);
   res.json({ data: result });
 }));
-
-import { startBillingScheduler } from './scheduler.js';
-if (process.env.NODE_ENV !== 'test') {
-  startBillingScheduler();
-}
-

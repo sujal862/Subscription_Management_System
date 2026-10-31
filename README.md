@@ -1,13 +1,13 @@
 # Brightloop - Subscription Management System
 
-One repository for a four-person hackathon team. **Member 1 Hours 1-6 provide session
-authentication, protected navigation, staff management, password recovery and a real
-business dashboard.** Integrated teammates' code includes products/variants/plans,
+Built by a four-person hackathon team, Brightloop provides session authentication,
+protected navigation, staff management, password recovery and a database-backed
+business dashboard. The application includes products/variants/plans,
 customers, templates, subscription lifecycle, taxes, recurring invoices and payments.
-The full final demo is incomplete: discount management, invoice send/print actions
-and the customer invoice portal are still pending in the current integrated main.
-The customer subscription portal is integrated with ownership checks.
-See [submission verification](docs/HOUR_5_6_HANDOFF.md) for evidence and gaps.
+All four modules are integrated, including discount management, invoice send/print,
+both customer portals and scheduled billing. Final review fixes cover billing
+concurrency, exact discount allocation, portal response privacy and mobile layout.
+See [final verification](docs/FINAL_REVIEW.md) for results, configuration and limits.
 
 ## Start locally
 
@@ -45,14 +45,14 @@ No Docker, cloud database, email credentials or paid services are needed for set
 ## Team start
 
 Read [team workflow](docs/TEAM.md), [API contract](docs/API_CONTRACT.md),
-[requirements](docs/REQUIREMENTS.md), and your six hourly prompts:
+and [requirements](docs/REQUIREMENTS.md).
 
-| Member | Module | Prompt file | Working branch |
-|---|---|---|---|
-| 1 - leader | Auth, permissions, staff, dashboard | [Member 1](docs/prompts/MEMBER_1.md) | foundation |
-| 2 | Products, plans, taxes, discounts | [Member 2](docs/prompts/MEMBER_2.md) | work/catalog |
-| 3 | Customers, quotations, subscriptions | [Member 3](docs/prompts/MEMBER_3.md) | work/subscriptions |
-| 4 | Recurring invoices, payments | [Member 4](docs/prompts/MEMBER_4.md) | work/billing |
+| Member | Module | Working branch |
+|---|---|---|
+| 1 - leader | Auth, permissions, staff, dashboard | foundation |
+| 2 | Products, plans, taxes, discounts | work/catalog |
+| 3 | Customers, quotations, subscriptions | work/subscriptions |
+| 4 | Recurring invoices, payments | work/billing |
 
 Create YOUR branch after cloning (example for Member 2):
 
@@ -96,15 +96,15 @@ server/src/middleware/ session, role and request-origin checks
 server/src/lib/        DB, HTTP and configuration helpers
 shared/                response shapes, statuses and money formatting
 prisma/                agreed starting schema and migration history
-docs/prompts/          one prompt per member per hour
+docs/                  setup, API contracts, requirements and verification
 tests/                 backend and DOM integration tests with isolated databases
 ```
 
 Zod, cookie-parser, rate limits and Nodemailer support validation, real cookie
 sessions and email delivery. Local application data persists in SQLite. After npm
 ci has completed, normal offline use needs no cloud APIs; dependency installation
-and GitHub synchronization require network access. The pending business features
-mean this version does not yet satisfy every problem-statement requirement.
+and GitHub synchronization require network access. External SMTP delivery and a
+hosted production deployment require separate configuration and verification.
 
 ## Member 1 Hour 1 handoff
 
@@ -146,8 +146,24 @@ partial payment, check the Dashboard and then record the remaining balance. The
 invoice becomes PAID and the Dashboard reflects the collection. The real HTTP
 integration test covers this flow. Account creation, persistence, permissions,
 staff management and recovery can also be demonstrated. Never directly edit the
-demo DB to present unimplemented discount/invoice-portal actions as working. See the handoff
-for the remaining end-to-end demo blockers.
+demo DB to bypass workflow steps. Discounts can be configured in Catalog and are
+applied before tax on billing. The invoice can be emailed through SMTP or the
+private file outbox, printed from its detail view, and read from its customer's
+portal. The scheduler activates due terms, bills due periods and closes expired
+terms after catch-up; it runs at startup and every minute.
+
+Optional browser verification (requires an installed Microsoft Edge):
+
+```sh
+npm install --prefix .local/browser-tools --no-save --package-lock=false playwright@1.56.1
+npm run build
+node --import tsx scripts/browser-smoke.mjs
+```
+
+This keeps browser tooling outside the pinned application dependencies. The check
+uses an isolated temporary database and random in-memory credentials. Screenshots,
+print PDF and timing results are ignored under .local/final-verification. It does
+not use your development data or send messages to a real email provider.
 
 Production-style local serving: `npm run build`, then set APP_URL to
 `http://localhost:4000` in private .env and run `npm start`; use localhost consistently.

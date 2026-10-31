@@ -270,7 +270,12 @@
 }
 
 /* Print Styles */
+.invoice-print-heading { display: none; }
 @media print {
+  .invoice-print-heading { display: block; margin-bottom: 24px; }
+  body:has(.printable-invoice-card) .billing-container > :not(.printable-modal-overlay) { display: none !important; }
+  .workspace { display: block !important; }
+  .page-content { padding: 0 !important; max-width: none !important; }
   /* Hide navigation, buttons, app shell */
   header,
   nav,
@@ -328,5 +333,15 @@
     margin: 1.5cm;
     size: auto;
   }
+}
+
+@media (max-width: 760px) {
+  .billing-table-panel, .modal-body { overflow-x: auto; }
+  .billing-table { min-width: 640px; }
+  .modal-overlay { padding: 12px; }
+  .modal-content { max-width: 100%; }
+  .snapshot-grid { grid-template-columns: minmax(0,1fr); }
+  .modal-header, .modal-footer { flex-wrap: wrap; }
+  .billing-container .page-heading > div:last-child { flex-wrap: wrap; }
 }
 

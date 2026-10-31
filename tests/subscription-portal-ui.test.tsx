@@ -10,6 +10,8 @@ import { createLifecycleFixture } from './fixtures/subscriptions.js';
 test('customer subscription UI uses owned APIs and handles actions, filters and network errors', async t => {
   const { db, base } = await testServer(t);
   const dom = new JSDOM('<!doctype html><html><body></body></html>', { url: 'http://localhost:5173/portal/subscriptions' });
+  const scrolled: HTMLElement[] = [];
+  dom.window.HTMLElement.prototype.scrollIntoView = function () { scrolled.push(this); };
   const originals = new Map<string, PropertyDescriptor | undefined>();
   for (const [key, value] of Object.entries({ React, window: dom.window, document: dom.window.document,
     navigator: dom.window.navigator, HTMLElement: dom.window.HTMLElement, HTMLInputElement: dom.window.HTMLInputElement,
@@ -50,6 +52,9 @@ test('customer subscription UI uses owned APIs and handles actions, filters and 
   async function view(number: string) {
     const button = await ui.screen.findByRole('button', { name: `View ${number}` }); ui.fireEvent.click(button);
     await ui.waitFor(() => assert.equal(details().getByRole('heading', { name: number }).textContent, number));
+    const region = ui.screen.getByRole('region', { name: 'Your subscription details' });
+    assert.equal(dom.window.document.activeElement, region, 'opening details moves keyboard focus to them');
+    assert.equal(scrolled.at(-1), region, 'opening details brings them into view');
   }
   const click = (name: string) => ui.fireEvent.click(details().getByRole('button', { name }));
   await t.test('cards and details show only owned subscriptions and no staff controls', async () => {
@@ -99,6 +104,7 @@ test('customer subscription UI uses owned APIs and handles actions, filters and 
     offline = true; ui.fireEvent.click(ui.screen.getByRole('button', { name: 'Refresh subscriptions' }));
     const retry = await ui.screen.findByRole('button', { name: 'Retry subscriptions' });
     assert.ok(ui.screen.getAllByRole('alert').some(item => /Cannot reach Brightloop/.test(item.textContent ?? '')));
+    await ui.waitFor(() => assert.ok(dom.window.document.activeElement?.matches('[role="alert"]'), 'detail failures receive focus'));
     offline = false; ui.fireEvent.click(retry);
     await ui.screen.findByRole('button', { name: `View ${fixture.subscription.number}` });
   });

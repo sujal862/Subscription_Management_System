@@ -1,151 +1,59 @@
 import { db } from '../../lib/db.js';
+import { HttpError } from '../../lib/http.js';
 import { createInvoiceFromSubscription } from './service.js';
 import { calculateNextPeriod } from './calendar.js';
-import type { Prisma } from '@prisma/client';
 
 export interface BillingRunOptions {
-  targetDate?: Date;
-  subscriptionId?: string;
-  maxCatchUpCycles?: number;
+  targetDate?: Date; subscriptionId?: string; maxCatchUpCycles?: number; maxSubscriptions?: number;
 }
-
 export interface BillingRunResult {
-  targetDate: string;
-  processedSubscriptions: number;
-  invoicesCreated: number;
-  skippedDuplicates: number;
-  errors: Array<{
-    subscriptionId: string;
-    subscriptionNumber: string;
-    error: string;
-  }>;
+  targetDate: string; processedSubscriptions: number; invoicesCreated: number;
+  skippedDuplicates: number; hasMore: boolean;
+  errors: Array<{ subscriptionId: string; subscriptionNumber: string; error: string }>;
 }
 
-const DEFAULT_MAX_CATCH_UP_CYCLES = 12;
-
-/**
- * Shared Recurring Billing Engine.
- * Processes active subscriptions where nextBillingDate <= targetDate.
- * Enforces transaction safety, anchor-day clamping, expiry boundaries, and idempotency.
- */
+// Manual and scheduled runs share this engine. Every iteration reads the persisted
+// cursor inside its transaction, so overlapping workers can never move it backwards.
 export async function runBillingCycle(options: BillingRunOptions = {}): Promise<BillingRunResult> {
-  const targetDate = options.targetDate ? new Date(options.targetDate) : new Date();
-  const maxCycles = options.maxCatchUpCycles ?? DEFAULT_MAX_CATCH_UP_CYCLES;
-
-  const where: Prisma.SubscriptionWhereInput = {
-    status: 'ACTIVE',
-    nextBillingDate: { lte: targetDate },
+  const targetDate = options.targetDate ?? new Date();
+  const maxCycles = options.maxCatchUpCycles ?? 12;
+  const batchSize = options.maxSubscriptions ?? 100;
+  if (!Number.isFinite(targetDate.getTime()) || !Number.isInteger(maxCycles) || maxCycles < 1 || maxCycles > 100 || !Number.isInteger(batchSize) || batchSize < 1 || batchSize > 1000) {
+    throw new HttpError(400, 'INVALID_BILLING_OPTIONS', 'Invalid billing date or batch limits');
+  }
+  const where = {
+    status: 'ACTIVE' as const, nextBillingDate: { lte: targetDate },
     ...(options.subscriptionId ? { id: options.subscriptionId } : {}),
+    OR: [{ expiryDate: null }, { nextBillingDate: { lt: db.subscription.fields.expiryDate } }],
   };
-
-  const activeSubscriptions = await db.subscription.findMany({
-    where,
-    include: {
-      lines: true,
-      customer: true,
-    },
-    orderBy: { nextBillingDate: 'asc' },
-  });
-
-  const result: BillingRunResult = {
-    targetDate: targetDate.toISOString(),
-    processedSubscriptions: 0,
-    invoicesCreated: 0,
-    skippedDuplicates: 0,
-    errors: [],
-  };
-
-  for (const subscription of activeSubscriptions) {
-    if (!subscription.nextBillingDate) continue;
-
-    let currentBillingDate: Date = new Date(subscription.nextBillingDate);
-    let cyclesForSub = 0;
-    let hadError = false;
-
-    result.processedSubscriptions++;
-
-    // Bounded catch-up loop: process due periods sequentially without skipping
-    while (currentBillingDate <= targetDate && cyclesForSub < maxCycles && !hadError) {
-      // Coordinate subscription expiry boundary:
-      // If subscription has an expiryDate and current billing start is on or after expiry, do not bill.
-      if (subscription.expiryDate && currentBillingDate >= subscription.expiryDate) {
-        break;
-      }
-
-      const { nextPeriodStart, periodEnd } = calculateNextPeriod(
-        currentBillingDate,
-        subscription.billingInterval,
-        subscription.billingAnchorDay
-      );
-
+  const selected = await db.subscription.findMany({ where, select: { id: true, number: true },
+    orderBy: [{ nextBillingDate: 'asc' }, { id: 'asc' }], take: batchSize });
+  const result: BillingRunResult = { targetDate: targetDate.toISOString(), processedSubscriptions: selected.length,
+    invoicesCreated: 0, skippedDuplicates: 0, hasMore: false, errors: [] };
+  for (const subscription of selected) {
+    for (let cycle = 0; cycle < maxCycles; cycle++) {
       try {
-        await db.$transaction(async tx => {
-          // Re-verify that subscription is still ACTIVE inside transaction (avoids worker race)
-          const freshSub = await tx.subscription.findUnique({
-            where: { id: subscription.id },
-            select: { status: true, nextBillingDate: true, expiryDate: true },
-          });
-
-          if (!freshSub || freshSub.status !== 'ACTIVE') {
-            hadError = true;
-            return;
-          }
-
-          if (freshSub.expiryDate && currentBillingDate >= freshSub.expiryDate) {
-            hadError = true;
-            return;
-          }
-
-          // Check existing unique billing-period key: @@unique([subscriptionId, periodStart])
-          const existingInvoice = await tx.invoice.findUnique({
-            where: {
-              subscriptionId_periodStart: {
-                subscriptionId: subscription.id,
-                periodStart: currentBillingDate,
-              },
-            },
-          });
-
-          if (existingInvoice) {
-            // Already billed this period. Advance nextBillingDate to prevent infinite loop.
-            await tx.subscription.update({
-              where: { id: subscription.id },
-              data: { nextBillingDate: nextPeriodStart },
-            });
-            result.skippedDuplicates++;
-          } else {
-            // Generate invoice with snapshot of customer, lines, and prices
-            await createInvoiceFromSubscription({
-              subscriptionId: subscription.id,
-              periodStart: currentBillingDate,
-              periodEnd,
-              status: 'DRAFT',
-              prisma: tx,
-            });
-
-            // Advance nextBillingDate only upon successful invoice creation
-            await tx.subscription.update({
-              where: { id: subscription.id },
-              data: { nextBillingDate: nextPeriodStart },
-            });
-
-            result.invoicesCreated++;
-          }
+        const outcome = await db.$transaction(async tx => {
+          const current = await tx.subscription.findUnique({ where: { id: subscription.id } });
+          if (!current || current.status !== 'ACTIVE' || !current.nextBillingDate || current.nextBillingDate > targetDate ||
+            (current.expiryDate && current.nextBillingDate >= current.expiryDate)) return 'done';
+          const periodStart = current.nextBillingDate;
+          const { nextPeriodStart, periodEnd } = calculateNextPeriod(periodStart, current.billingInterval, current.billingAnchorDay);
+          const existing = await tx.invoice.findUnique({ where: { subscriptionId_periodStart: { subscriptionId: current.id, periodStart } } });
+          if (!existing) await createInvoiceFromSubscription({ subscriptionId: current.id, periodStart, periodEnd, status: 'DRAFT', prisma: tx });
+          const moved = await tx.subscription.updateMany({ where: { id: current.id, status: 'ACTIVE', nextBillingDate: periodStart, updatedAt: current.updatedAt }, data: { nextBillingDate: nextPeriodStart } });
+          if (moved.count !== 1) throw new HttpError(409, 'STALE_SUBSCRIPTION', 'Subscription changed; retry billing');
+          return existing ? 'duplicate' : 'created';
         });
-
-        // Update loop cursor
-        currentBillingDate = nextPeriodStart;
-        cyclesForSub++;
-      } catch (err: any) {
-        hadError = true;
-        result.errors.push({
-          subscriptionId: subscription.id,
-          subscriptionNumber: subscription.number,
-          error: err.message || 'Unknown billing error',
-        });
+        if (outcome === 'done') break;
+        if (outcome === 'created') result.invoicesCreated++; else result.skippedDuplicates++;
+      } catch {
+        result.errors.push({ subscriptionId: subscription.id, subscriptionNumber: subscription.number,
+          error: 'Billing could not complete for this subscription. Check its configuration and retry.' });
+        break;
       }
     }
   }
-
+  result.hasMore = (await db.subscription.count({ where })) > 0;
   return result;
 }

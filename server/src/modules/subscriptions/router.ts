@@ -9,7 +9,6 @@ export { subscriptionPortalRouter } from './portal.js';
 import { draftSchema, customerSchema, pageSchema, amounts } from './validation.js';
 import { templatesRouter, quotationSchema, createQuotation } from './quotations.js';
 import { lifecycleInclude, lifecycleTransitionSchema, transitionSubscription, renewalSchema, renewSubscription, processSubscriptionLifecycle } from './lifecycle.js';
-import { startSubscriptionLifecycleScheduler } from './scheduler.js';
 
 const missing = (name: string): never => { throw new HttpError(404, 'NOT_FOUND', `${name} not found`); };
 const invalid = (message: string): never => { throw new HttpError(400, 'VALIDATION_ERROR', message); };
@@ -128,4 +127,3 @@ function customerConflict(error: unknown): never {
 }
 export const subscriptionsRouter = Router();
 subscriptionsRouter.use(requireRole('ADMIN', 'STAFF'), createSubscriptionHandlers());
-if (process.env.NODE_ENV !== 'test') startSubscriptionLifecycleScheduler();

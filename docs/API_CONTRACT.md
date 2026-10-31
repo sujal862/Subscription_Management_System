@@ -132,6 +132,8 @@ POST /invoices/:id/confirm, /cancel, /send;
 GET /invoices/:id/print; GET/POST /invoices/:id/payments.
 Payment input {method,amountMinor,paidAt,note?,reference?}.
 Invoice status DRAFT -> CONFIRMED -> PAID; cancellation must not orphan payments.
+Confirm/cancel return balances (paidAmountMinor, remainingBalanceMinor, isOverdue)
+as well as the invoice, so action UIs remain usable without reopening the detail.
 No payment gateway is required: staff records received payments.
 Use unique (subscriptionId,periodStart), transactions and safe discount redemption
 to prevent double billing. Billing run and scheduler share one engine. Handle missed
@@ -140,6 +142,15 @@ Monthly/yearly intervals use calendar arithmetic with original anchor-day clampi
 Check closed/paused/expired eligibility. Partial payments allowed; overpayment,
 payments on draft/cancelled invoices and repeated unique reference rejected.
 Portal GET /portal/invoices and /:id and /:id/print; filter by authenticated customerId.
+Customer invoice DTOs expose saved invoice/line totals, basic payment dates/methods
+and discount labels; they omit staff payment notes/references and internal relations
+or rule thresholds. /send returns deliveryMode=file|smtp; file means private local
+outbox delivery, not a message in an external inbox. HTML invoice fields are escaped.
+Billing selects at most 100 due subscriptions per run, 12 periods per subscription
+by default (manual maxCatchUpCycles up to 100). hasMore signals pending catch-up.
+The startup/minute scheduler coordinates activation, billing and expiry closure.
+Product discount thresholds/savings cover every line for that product, and exact
+integer allocation preserves the chosen saving across matching variants/lines.
 
 ## Integration hooks
 

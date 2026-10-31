@@ -2,8 +2,10 @@ import { db } from '../../lib/db.js';
 import { HttpError } from '../../lib/http.js';
 import { sendMail } from '../../lib/mail.js';
 import { calculateInvoice, type LineCalculationInput } from './calculation.js';
-import { selectBestEligibleDiscount } from './discounts.js';
-import type { Prisma, InvoiceStatus } from '@prisma/client';
+import { selectBestEligibleDiscount, allocateDiscount } from './discounts.js';
+import { randomBytes } from 'node:crypto';
+import { escapeHtml } from '../../lib/html.js';
+import { Prisma, type InvoiceStatus } from '@prisma/client';
 
 export interface CreateInvoiceOptions {
   subscriptionId: string;
@@ -29,17 +31,15 @@ export interface RecordPaymentInput {
   reference?: string | null;
 }
 
-let invoiceCounter = 1;
-
 export function generateInvoiceNumber(date: Date = new Date()): string {
   const year = date.getUTCFullYear();
   const month = String(date.getUTCMonth() + 1).padStart(2, '0');
-  const sequence = String(invoiceCounter++).padStart(4, '0');
-  const randomSuffix = Math.random().toString(36).substring(2, 6).toUpperCase();
-  return `INV-${year}${month}-${sequence}-${randomSuffix}`;
+  return `INV-${year}${month}-${randomBytes(8).toString('hex').toUpperCase()}`;
 }
 
-export async function createInvoiceFromSubscription(options: CreateInvoiceOptions) {
+export async function createInvoiceFromSubscription(options: CreateInvoiceOptions): Promise<Prisma.InvoiceGetPayload<{ include: { lines: true; payments: true; customer: true } }>> {
+  // Invoice, discount reservation and redemption always share one transaction.
+  if (!options.prisma) return db.$transaction(tx => createInvoiceFromSubscription({ ...options, prisma: tx }));
   const client = options.prisma ?? db;
 
   const subscription = await client.subscription.findUnique({
@@ -77,30 +77,13 @@ export async function createInvoiceFromSubscription(options: CreateInvoiceOption
   );
 
   // 2. Allocate discount amounts to individual lines
-  let lineDiscounts: number[] = new Array(subscription.lines.length).fill(0);
-
+  const lineDiscounts = allocateDiscount(discountInputs, bestDiscount);
   if (bestDiscount) {
-    if (bestDiscount.productLineIndex !== undefined) {
-      // Product-scoped discount applies to the specific product line
-      lineDiscounts[bestDiscount.productLineIndex] = bestDiscount.savingsMinor;
-    } else {
-      // Subscription-scoped discount: distribute across lines proportionally
-      const totalRawSubtotal = discountInputs.reduce((sum, l) => sum + l.quantity * l.unitPriceMinor, 0);
-      let allocatedDiscount = 0;
-
-      lineDiscounts = subscription.lines.map((line, idx) => {
-        if (idx === subscription.lines.length - 1) {
-          return bestDiscount.savingsMinor - allocatedDiscount;
-        }
-        const lineSubtotal = line.quantity * line.unitPriceMinor;
-        const lineShare = Math.min(
-          lineSubtotal,
-          Math.round((lineSubtotal / totalRawSubtotal) * bestDiscount.savingsMinor)
-        );
-        allocatedDiscount += lineShare;
-        return lineShare;
-      });
-    }
+    const reserved = await client.discountRule.updateMany({ where: {
+      id: bestDiscount.rule.id, uses: bestDiscount.rule.uses, isActive: true,
+      OR: [{ usageLimit: null }, { usageLimit: { gt: bestDiscount.rule.uses } }],
+    }, data: { uses: { increment: 1 } } });
+    if (reserved.count !== 1) throw new HttpError(409, 'DISCOUNT_CHANGED', 'Discount availability changed. Retry billing.');
   }
 
   // 3. Calculate integer paise values for all lines (tax is calculated on discounted base)
@@ -111,7 +94,9 @@ export async function createInvoiceFromSubscription(options: CreateInvoiceOption
     discountMinor: lineDiscounts[idx] || 0,
   }));
 
-  const calcResult = calculateInvoice(calculationInputs);
+  let calcResult;
+  try { calcResult = calculateInvoice(calculationInputs); }
+  catch { throw new HttpError(400, 'INVALID_INVOICE_AMOUNT', 'Invoice quantities or amounts exceed supported limits'); }
 
   const dueDate = new Date(options.periodStart.getTime() + subscription.paymentTermDays * 24 * 60 * 60 * 1000);
   const number = generateInvoiceNumber(options.periodStart);
@@ -165,19 +150,14 @@ export async function createInvoiceFromSubscription(options: CreateInvoiceOption
       },
     });
 
-    await client.discountRule.update({
-      where: { id: bestDiscount.rule.id },
-      data: {
-        uses: { increment: 1 },
-      },
-    });
   }
 
   return invoice;
 }
 
 export async function confirmInvoice(id: string) {
-  const invoice = await db.invoice.findUnique({
+  return db.$transaction(async tx => {
+  const invoice = await tx.invoice.findUnique({
     where: { id },
   });
 
@@ -189,8 +169,8 @@ export async function confirmInvoice(id: string) {
     throw new HttpError(400, 'INVALID_STATUS', `Cannot confirm invoice with status ${invoice.status}. Only DRAFT invoices can be confirmed.`);
   }
 
-  return db.invoice.update({
-    where: { id },
+  return invoiceBalances(await tx.invoice.update({
+    where: { id, status: 'DRAFT' },
     data: { status: 'CONFIRMED' },
     include: {
       lines: true,
@@ -198,11 +178,13 @@ export async function confirmInvoice(id: string) {
       discountRedemptions: { include: { discount: true } },
       customer: true,
     },
+  }));
   });
 }
 
 export async function cancelInvoice(id: string) {
-  const invoice = await db.invoice.findUnique({
+  return db.$transaction(async tx => {
+  const invoice = await tx.invoice.findUnique({
     where: { id },
     include: { payments: true },
   });
@@ -223,8 +205,8 @@ export async function cancelInvoice(id: string) {
     throw new HttpError(400, 'ALREADY_PAID', 'Cannot cancel a paid invoice.');
   }
 
-  return db.invoice.update({
-    where: { id },
+  return invoiceBalances(await tx.invoice.update({
+    where: { id, status: invoice.status },
     data: { status: 'CANCELLED' },
     include: {
       lines: true,
@@ -232,17 +214,19 @@ export async function cancelInvoice(id: string) {
       discountRedemptions: { include: { discount: true } },
       customer: true,
     },
+  }));
   });
 }
 
 export async function recordPayment(invoiceId: string, input: RecordPaymentInput) {
-  if (!Number.isInteger(input.amountMinor) || input.amountMinor <= 0) {
+  if (!Number.isSafeInteger(input.amountMinor) || input.amountMinor <= 0 || input.amountMinor > 2147483647) {
     throw new HttpError(400, 'INVALID_AMOUNT', 'Payment amount must be a positive integer in paise');
   }
 
   if (!input.method || input.method.trim().length === 0) {
     throw new HttpError(400, 'INVALID_METHOD', 'Payment method is required');
   }
+  if (input.paidAt && !Number.isFinite(input.paidAt.getTime())) throw new HttpError(400, 'INVALID_PAYMENT_DATE', 'Payment date must be valid');
 
   const cleanReference = input.reference && input.reference.trim().length > 0 ? input.reference.trim() : null;
 
@@ -329,6 +313,9 @@ export async function recordPayment(invoiceId: string, input: RecordPaymentInput
         remainingBalanceMinor: newRemainingBalance,
       },
     };
+  }).catch(error => {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') throw new HttpError(400, 'DUPLICATE_REFERENCE', 'That payment reference is already recorded');
+    throw error;
   });
 }
 
@@ -362,6 +349,7 @@ export async function listInvoices(options: ListInvoicesOptions) {
   const page = Math.max(1, options.page ?? 1);
   const pageSize = Math.min(100, Math.max(1, options.pageSize ?? 20));
   const skip = (page - 1) * pageSize;
+  if (options.overdue) return listOverdueInvoices(options, page, pageSize);
 
   const where: Prisma.InvoiceWhereInput = {};
   if (options.status) {
@@ -381,7 +369,7 @@ export async function listInvoices(options: ListInvoicesOptions) {
       where,
       skip,
       take: pageSize,
-      orderBy: { issuedAt: 'desc' },
+      orderBy: [{ issuedAt: 'desc' }, { id: 'asc' }],
       include: {
         lines: true,
         payments: true,
@@ -413,9 +401,29 @@ export async function listInvoices(options: ListInvoicesOptions) {
   };
 }
 
+async function listOverdueInvoices(options: ListInvoicesOptions, page: number, pageSize: number) {
+  const include = { lines: true, payments: true, discountRedemptions: { include: { discount: true } },
+    customer: { select: { id: true, name: true, email: true, company: true } } } as const;
+  return db.$transaction(async tx => {
+    const scope = Prisma.sql`i.status = 'CONFIRMED' AND i.dueDate < ${new Date()}
+      AND i.totalMinor > COALESCE((SELECT SUM(p.amountMinor) FROM Payment p WHERE p.invoiceId = i.id),0)
+      ${options.customerId ? Prisma.sql`AND i.customerId = ${options.customerId}` : Prisma.empty}
+      ${options.status && options.status !== 'CONFIRMED' ? Prisma.sql`AND 0=1` : Prisma.empty}`;
+    const [count] = await tx.$queryRaw<{ total: bigint }[]>(Prisma.sql`SELECT COUNT(*) AS total FROM Invoice i WHERE ${scope}`);
+    const ids = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`SELECT i.id FROM Invoice i WHERE ${scope}
+      ORDER BY i.dueDate ASC, i.id ASC LIMIT ${pageSize} OFFSET ${(page - 1) * pageSize}`);
+    const invoices = await tx.invoice.findMany({ where: { id: { in: ids.map(row => row.id) } }, include,
+      orderBy: [{ dueDate: 'asc' }, { id: 'asc' }] });
+    return { page, pageSize, total: Number(count.total), items: invoices.map(invoice => {
+      const paidAmountMinor = invoice.payments.reduce((sum, payment) => sum + payment.amountMinor, 0);
+      return { ...invoice, paidAmountMinor, remainingBalanceMinor: Math.max(0, invoice.totalMinor - paidAmountMinor), isOverdue: true };
+    }) };
+  });
+}
+
 export async function getInvoiceById(id: string, customerId?: string) {
-  const invoice = await db.invoice.findUnique({
-    where: { id },
+  const invoice = await db.invoice.findFirst({
+    where: { id, ...(customerId ? { customerId } : {}) },
     include: {
       lines: true,
       payments: {
@@ -455,7 +463,7 @@ export async function getInvoiceById(id: string, customerId?: string) {
 export async function getPrintableInvoice(id: string, customerId?: string) {
   const invoice = await getInvoiceById(id, customerId);
   return {
-    invoice,
+    invoice: customerId ? customerInvoice(invoice) : invoice,
     printable: true,
   };
 }
@@ -510,7 +518,7 @@ export async function sendInvoiceEmail(invoiceId: string) {
 
   const lineItemsHtml = invoice.lines
     .map(line => `<tr>
-      <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb;">${line.description}</td>
+      <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb;">${escapeHtml(line.description)}</td>
       <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: center;">${line.quantity}</td>
       <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: right;">₹${(line.unitPriceMinor / 100).toFixed(2)}</td>
       <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: right;">₹${(line.amountMinor / 100).toFixed(2)}</td>
@@ -519,18 +527,18 @@ export async function sendInvoiceEmail(invoiceId: string) {
 
   const html = `<!DOCTYPE html>
 <html>
-<head><meta charset="utf-8"><title>Invoice ${invoice.number}</title></head>
+<head><meta charset="utf-8"><title>Invoice ${escapeHtml(invoice.number)}</title></head>
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1f2937; line-height: 1.5; padding: 24px; max-width: 650px; margin: 0 auto;">
   <div style="border-bottom: 2px solid #133c35; padding-bottom: 16px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: baseline;">
     <h1 style="color: #133c35; margin: 0; font-size: 24px;">Brightloop Software</h1>
-    <span style="font-size: 14px; color: #6b7280;">Invoice #${invoice.number}</span>
+    <span style="font-size: 14px; color: #6b7280;">Invoice #${escapeHtml(invoice.number)}</span>
   </div>
   <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; background: #f9fafb; padding: 16px; border-radius: 8px;">
     <div>
       <div style="font-size: 12px; color: #6b7280; text-transform: uppercase;">Billed To</div>
-      <div style="font-weight: 600; font-size: 15px;">${invoice.customerName}</div>
-      <div style="color: #4b5563; font-size: 14px;">${recipient}</div>
-      ${invoice.customerAddress ? `<div style="color: #4b5563; font-size: 14px;">${invoice.customerAddress}</div>` : ''}
+      <div style="font-weight: 600; font-size: 15px;">${escapeHtml(invoice.customerName)}</div>
+      <div style="color: #4b5563; font-size: 14px;">${escapeHtml(recipient)}</div>
+      ${invoice.customerAddress ? `<div style="color: #4b5563; font-size: 14px;">${escapeHtml(invoice.customerAddress)}</div>` : ''}
     </div>
     <div>
       <div style="font-size: 12px; color: #6b7280; text-transform: uppercase;">Invoice Details</div>
@@ -583,5 +591,33 @@ export async function sendInvoiceEmail(invoiceId: string) {
     sent: true,
     sentAt: now,
     recipient,
+    deliveryMode: (process.env.MAIL_MODE ?? 'file') === 'file' ? 'file' : 'smtp',
   };
+}
+
+type InvoiceForCustomer = Prisma.InvoiceGetPayload<{ include: { lines: true; payments: true;
+  discountRedemptions: { include: { discount: true } } } }> & {
+    paidAmountMinor: number; remainingBalanceMinor: number; isOverdue: boolean;
+  };
+// Explicit response fields prevent staff notes, commercial thresholds and internal
+// relations from silently becoming part of the customer's portal as models evolve.
+export function customerInvoice(invoice: InvoiceForCustomer) {
+  const { id, number, customerId, customerName, customerEmail, customerAddress, status,
+    periodStart, periodEnd, issuedAt, dueDate, subtotalMinor, discountMinor, taxMinor,
+    totalMinor, sentAt, paidAmountMinor, remainingBalanceMinor, isOverdue } = invoice;
+  return { id, number, customerId, customerName, customerEmail, customerAddress, status,
+    periodStart, periodEnd, issuedAt, dueDate, subtotalMinor, discountMinor, taxMinor,
+    totalMinor, sentAt, paidAmountMinor, remainingBalanceMinor, isOverdue,
+    lines: invoice.lines.map(({ id, productId, description, quantity, unitPriceMinor, discountMinor, taxRateBps, taxMinor, amountMinor }) => ({ id, productId, description, quantity, unitPriceMinor, discountMinor, taxRateBps, taxMinor, amountMinor })),
+    payments: invoice.payments.map(({ id, amountMinor, method, paidAt }) => ({ id, amountMinor, method, paidAt })),
+    discountRedemptions: invoice.discountRedemptions.map(({ amountMinor, discount }) => ({ amountMinor,
+      discount: { name: discount.name, kind: discount.kind, value: discount.value } })),
+  };
+}
+
+function invoiceBalances<T extends { totalMinor: number; status: string; dueDate: Date; payments: { amountMinor: number }[] }>(invoice: T) {
+  const paidAmountMinor = invoice.payments.reduce((sum, payment) => sum + payment.amountMinor, 0);
+  const remainingBalanceMinor = Math.max(0, invoice.totalMinor - paidAmountMinor);
+  return { ...invoice, paidAmountMinor, remainingBalanceMinor,
+    isOverdue: invoice.status === 'CONFIRMED' && invoice.dueDate < new Date() && remainingBalanceMinor > 0 };
 }

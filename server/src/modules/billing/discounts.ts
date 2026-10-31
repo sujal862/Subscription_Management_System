@@ -4,6 +4,7 @@ export interface DiscountCandidate {
   rule: DiscountRule;
   savingsMinor: number;
   productLineIndex?: number;
+  productLineIndexes?: number[];
 }
 
 export interface LineDiscountInput {
@@ -47,7 +48,7 @@ export function selectBestEligibleDiscount(
       if (rule.kind === 'FIXED') {
         savings = Math.min(invoiceSubtotalMinor, rule.value);
       } else if (rule.kind === 'PERCENTAGE') {
-        savings = Math.min(invoiceSubtotalMinor, Math.round((invoiceSubtotalMinor * rule.value) / 10000));
+        savings = Math.min(invoiceSubtotalMinor, Number((BigInt(invoiceSubtotalMinor) * BigInt(rule.value) + 5000n) / 10000n));
       }
 
       if (savings > 0) {
@@ -61,27 +62,26 @@ export function selectBestEligibleDiscount(
       if (!rule.productId) continue;
 
       // Find matching line
-      const lineIndex = lines.findIndex(l => l.productId === rule.productId);
-      if (lineIndex === -1) continue;
-
-      const line = lines[lineIndex];
-      const lineSubtotal = line.quantity * line.unitPriceMinor;
+      const indexes = lines.flatMap((line, index) => line.productId === rule.productId ? [index] : []);
+      if (!indexes.length) continue;
+      const lineSubtotal = indexes.reduce((sum, index) => sum + lines[index].quantity * lines[index].unitPriceMinor, 0);
+      const matchingQuantity = indexes.reduce((sum, index) => sum + lines[index].quantity, 0);
 
       if (lineSubtotal < rule.minimumPurchaseMinor) continue;
-      if (line.quantity < rule.minimumQuantity) continue;
+      if (matchingQuantity < rule.minimumQuantity) continue;
 
       let savings = 0;
       if (rule.kind === 'FIXED') {
         savings = Math.min(lineSubtotal, rule.value);
       } else if (rule.kind === 'PERCENTAGE') {
-        savings = Math.min(lineSubtotal, Math.round((lineSubtotal * rule.value) / 10000));
+        savings = Math.min(lineSubtotal, Number((BigInt(lineSubtotal) * BigInt(rule.value) + 5000n) / 10000n));
       }
 
       if (savings > 0) {
         eligibleCandidates.push({
           rule,
           savingsMinor: savings,
-          productLineIndex: lineIndex,
+          productLineIndex: indexes[0], productLineIndexes: indexes,
         });
       }
     }
@@ -101,4 +101,22 @@ export function selectBestEligibleDiscount(
   });
 
   return eligibleCandidates[0];
+}
+
+// Largest remainder allocation preserves the exact saving, even for one-paise lines.
+export function allocateDiscount(lines: LineDiscountInput[], candidate: DiscountCandidate | null): number[] {
+  const result = lines.map(() => 0);
+  if (!candidate) return result;
+  const indexes = candidate.productLineIndexes ?? (candidate.productLineIndex === undefined ? lines.map((_, index) => index) : [candidate.productLineIndex]);
+  const total = indexes.reduce((sum, index) => sum + BigInt(lines[index].quantity) * BigInt(lines[index].unitPriceMinor), 0n);
+  if (!total) return result;
+  const saving = BigInt(candidate.savingsMinor);
+  const shares = indexes.map(index => {
+    const weighted = BigInt(lines[index].quantity) * BigInt(lines[index].unitPriceMinor) * saving;
+    result[index] = Number(weighted / total);
+    return { index, remainder: weighted % total };
+  }).sort((a, b) => a.remainder === b.remainder ? a.index - b.index : a.remainder > b.remainder ? -1 : 1);
+  let remainder = candidate.savingsMinor - result.reduce((sum, value) => sum + value, 0);
+  for (const share of shares) { if (remainder-- <= 0) break; result[share.index]++; }
+  return result;
 }

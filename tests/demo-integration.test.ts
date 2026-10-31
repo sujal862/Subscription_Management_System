@@ -23,6 +23,7 @@ test('integrated authenticated catalog to quotation, activation, billing and rep
   const product = await save('/catalog/products', { name: 'Integrated workspace', salesPriceMinor: 12000 });
   const variant = await save(`/catalog/products/${product.id}/variants`, { name: 'Plus', priceAdjustmentMinor: 500 });
   const tax = await save('/catalog/taxes', { name: 'GST 18%', rateBps: 1800 });
+  const discount = await save('/catalog/discounts', { name: 'First invoice discount', kind: 'FIXED', scope: 'SUBSCRIPTION', value: 1000, startsAt: '2020-01-01', usageLimit: 1 });
   const plan = await save('/catalog/plans', { name: 'Monthly workspace', productId: product.id, priceMinor: 10000, interval: 'MONTHLY', allowPause: true });
   const template = await save('/subscriptions/templates', { name: 'Monthly quotation', planId: plan.id, validDays: 14,
     lines: [{ productId: product.id, variantId: variant.id, quantity: 2, taxRuleId: tax.id }] });
@@ -39,27 +40,40 @@ test('integrated authenticated catalog to quotation, activation, billing and rep
   assert.equal(again.invoicesCreated, 0);
   const list = await (await call('/billing/invoices', undefined, cookie)).json();
   assert.equal(list.data.total, 1); assert.equal(list.data.items[0].status, 'DRAFT');
-  assert.equal(list.data.items[0].totalMinor, 24780);
+  assert.equal(list.data.items[0].discountMinor, 1000);
+  assert.equal(list.data.items[0].totalMinor, 23600);
+  assert.equal((await db.discountRule.findUniqueOrThrow({ where: { id: discount.id } })).uses, 1);
   const detail = await (await call(`/billing/invoices/${list.data.items[0].id}`, undefined, cookie)).json();
   assert.equal(detail.data.customerEmail, customer.email); assert.equal(detail.data.lines.length, 1);
   const summary = await (await call('/dashboard/summary', undefined, cookie)).json();
   assert.equal(summary.data.activeSubscriptions, 1); assert.equal(summary.data.invoicedRevenueMinor, 0, 'Draft billing must not fabricate recognized revenue');
   const invoiceId = list.data.items[0].id;
-  await save(`/billing/invoices/${invoiceId}/confirm`, {}, 200);
+  const confirmedInvoice = await save(`/billing/invoices/${invoiceId}/confirm`, {}, 200);
+  assert.equal(confirmedInvoice.remainingBalanceMinor, 23600);
+  assert.equal(confirmedInvoice.paidAmountMinor, 0);
   const partial = await save(`/billing/invoices/${invoiceId}/payments`, { method: 'CASH', amountMinor: 5000, paidAt: new Date().toISOString(), reference: 'DEMO-PARTIAL' });
-  assert.equal(partial.invoice.status, 'CONFIRMED'); assert.equal(partial.invoice.remainingBalanceMinor, 19780);
+  assert.equal(partial.invoice.status, 'CONFIRMED'); assert.equal(partial.invoice.remainingBalanceMinor, 18600);
   const partialSummary = (await (await call('/dashboard/summary', undefined, cookie)).json()).data;
-  assert.equal(partialSummary.invoicedRevenueMinor, 21000); assert.equal(partialSummary.collectedMinor, 5000);
-  assert.equal(partialSummary.outstandingMinor, 19780);
+  assert.equal(partialSummary.invoicedRevenueMinor, 20000); assert.equal(partialSummary.collectedMinor, 5000);
+  assert.equal(partialSummary.outstandingMinor, 18600);
   for (const invalid of [{ method: 'CASH', amountMinor: 50000 }, { method: 'CASH', amountMinor: 10, paidAt: 'bad' }, { method: 'CASH', amountMinor: 10, paidAt: '2026-02-30T00:00:00Z' }]) {
     assert.equal((await call(`/billing/invoices/${invoiceId}/payments`, invalid, cookie)).status, 400);
   }
   assert.equal((await call(`/billing/invoices/${invoiceId}/cancel`, {}, cookie)).status, 400);
-  const paid = await save(`/billing/invoices/${invoiceId}/payments`, { method: 'BANK', amountMinor: 19780, reference: 'DEMO-FINAL' });
+  const paid = await save(`/billing/invoices/${invoiceId}/payments`, { method: 'BANK', amountMinor: 18600, reference: 'DEMO-FINAL' });
   assert.equal(paid.invoice.status, 'PAID');
   const paidSummary = (await (await call('/dashboard/summary', undefined, cookie)).json()).data;
-  assert.equal(paidSummary.invoicedRevenueMinor, 21000); assert.equal(paidSummary.collectedMinor, 24780);
+  assert.equal(paidSummary.invoicedRevenueMinor, 20000); assert.equal(paidSummary.collectedMinor, 23600);
   assert.equal(paidSummary.outstandingMinor, 0);
+  const sent = await save(`/billing/invoices/${invoiceId}/send`, {}, 200);
+  assert.equal(sent.sent, true); assert.equal(sent.deliveryMode, 'file');
+  for (const route of [`/portal/subscriptions/${active.id}`, '/portal/invoices', `/portal/invoices/${invoiceId}`, `/portal/invoices/${invoiceId}/print`]) {
+    const response = await call(route, undefined, customerCookie); assert.equal(response.status, 200);
+    assert.ok(!(await response.text()).includes('costPriceMinor'));
+  }
+  const outsider = await call('/auth/signup', { name: 'Other customer', email: 'other@integration.test', password });
+  const outsiderCookie = outsider.headers.get('set-cookie')!.split(';')[0];
+  for (const route of [`/portal/subscriptions/${active.id}`, `/portal/invoices/${invoiceId}`, `/portal/invoices/${invoiceId}/print`]) assert.equal((await call(route, undefined, outsiderCookie)).status, 404);
   for (const path of ['/dashboard/summary', '/billing/invoices', '/subscriptions', '/catalog/products']) {
     assert.equal((await call(path, undefined, customerCookie)).status, 403);
   }
