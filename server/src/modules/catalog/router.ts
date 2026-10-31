@@ -148,6 +148,37 @@ const listPlansQuerySchema = z.object({
   productId: z.string().trim().optional(),
   interval: z.enum(['DAILY', 'WEEKLY', 'MONTHLY', 'YEARLY']).optional(),
   isActive: z.enum(['true', 'false']).optional(),
+  availableAt: z.string().trim().regex(/^\d{4}-\d{2}-\d{2}$/).optional(),
+});
+
+// Tax rule schemas (basis points: 0 to 10000; 1800 = 18%)
+const createTaxSchema = z.object({
+  name: z.string()
+    .trim()
+    .min(1, 'Tax rule name cannot be empty')
+    .max(255, 'Tax rule name cannot exceed 255 characters'),
+  rateBps: z.number()
+    .int('Tax rate must be an integer basis point value')
+    .min(0, 'Tax rate cannot be negative')
+    .max(10000, 'Tax rate cannot exceed 10000 basis points (100%)'),
+  isActive: z.boolean().optional().default(true),
+});
+
+const updateTaxSchema = z.object({
+  name: z.string().trim().min(1, 'Tax rule name cannot be empty').max(255).optional(),
+  rateBps: z.number()
+    .int('Tax rate must be an integer basis point value')
+    .min(0, 'Tax rate cannot be negative')
+    .max(10000, 'Tax rate cannot exceed 10000 basis points (100%)')
+    .optional(),
+  isActive: z.boolean().optional(),
+});
+
+const listTaxesQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  search: z.string().trim().optional(),
+  isActive: z.enum(['true', 'false']).optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -250,6 +281,64 @@ catalogRouter.patch('/products/:id', requireAdmin, asyncRoute(async (req: Reques
   res.json({ data: updated });
 }));
 
+// DELETE /products/:id - Archive product instead of deleting financial history (ADMIN only)
+catalogRouter.delete('/products/:id', requireAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const existing = await db.product.findUnique({
+    where: { id: req.params.id },
+    include: {
+      _count: {
+        select: {
+          subscriptionLines: true,
+          templateLines: true,
+          plans: true,
+        },
+      },
+    },
+  });
+  if (!existing) {
+    throw new HttpError(404, 'NOT_FOUND', 'Product not found');
+  }
+
+  // Always archive to protect financial history and referenced models
+  const archived = await db.product.update({
+    where: { id: req.params.id },
+    data: { isActive: false },
+    include: { variants: true },
+  });
+
+  res.json({
+    data: {
+      ...archived,
+      archived: true,
+      message: 'Product archived to preserve financial history and subscription integrity.',
+    },
+  });
+}));
+
+// POST /products/:id/archive - Explicit archive endpoint (ADMIN only)
+catalogRouter.post('/products/:id/archive', requireAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const existing = await db.product.findUnique({ where: { id: req.params.id } });
+  if (!existing) throw new HttpError(404, 'NOT_FOUND', 'Product not found');
+  const updated = await db.product.update({
+    where: { id: req.params.id },
+    data: { isActive: false },
+    include: { variants: true },
+  });
+  res.json({ data: updated });
+}));
+
+// POST /products/:id/unarchive - Explicit restore endpoint (ADMIN only)
+catalogRouter.post('/products/:id/unarchive', requireAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const existing = await db.product.findUnique({ where: { id: req.params.id } });
+  if (!existing) throw new HttpError(404, 'NOT_FOUND', 'Product not found');
+  const updated = await db.product.update({
+    where: { id: req.params.id },
+    data: { isActive: true },
+    include: { variants: true },
+  });
+  res.json({ data: updated });
+}));
+
 // ---------------------------------------------------------------------------
 // Variant Endpoints
 // ---------------------------------------------------------------------------
@@ -347,10 +436,10 @@ catalogRouter.patch('/products/:id/variants/:variantId', requireAdmin, asyncRout
 }));
 
 // ---------------------------------------------------------------------------
-// Plan Endpoints
+// Plan Endpoints (Lifecycle Controls & Availability Window)
 // ---------------------------------------------------------------------------
 
-// GET /plans - List plans with pagination, filters, and linked product (STAFF or ADMIN)
+// GET /plans - List plans with pagination, lifecycle controls, and filters (STAFF or ADMIN)
 catalogRouter.get('/plans', requireStaffOrAdmin, asyncRoute(async (req: Request, res: Response) => {
   const query = listPlansQuerySchema.parse(req.query);
   const where: Prisma.PlanWhereInput = {};
@@ -363,6 +452,13 @@ catalogRouter.get('/plans', requireStaffOrAdmin, asyncRoute(async (req: Request,
   }
   if (query.isActive !== undefined) {
     where.isActive = query.isActive === 'true';
+  }
+  if (query.availableAt) {
+    const targetDate = new Date(`${query.availableAt}T00:00:00.000Z`);
+    where.AND = [
+      { OR: [{ availableFrom: null }, { availableFrom: { lte: targetDate } }] },
+      { OR: [{ availableUntil: null }, { availableUntil: { gte: targetDate } }] },
+    ];
   }
   if (query.search) {
     where.OR = [
@@ -424,7 +520,7 @@ catalogRouter.get('/plans/:id', requireStaffOrAdmin, asyncRoute(async (req: Requ
   res.json({ data: plan });
 }));
 
-// POST /plans - Create recurring plan (ADMIN only)
+// POST /plans - Create recurring plan with lifecycle flags (ADMIN only)
 catalogRouter.post('/plans', requireAdmin, asyncRoute(async (req: Request, res: Response) => {
   const data = createPlanSchema.parse(req.body);
 
@@ -457,7 +553,7 @@ catalogRouter.post('/plans', requireAdmin, asyncRoute(async (req: Request, res: 
   res.status(201).json({ data: plan });
 }));
 
-// PATCH /plans/:id - Update plan (ADMIN only)
+// PATCH /plans/:id - Update plan lifecycle controls and fields (ADMIN only)
 catalogRouter.patch('/plans/:id', requireAdmin, asyncRoute(async (req: Request, res: Response) => {
   const existing = await db.plan.findUnique({
     where: { id: req.params.id },
@@ -490,6 +586,55 @@ catalogRouter.patch('/plans/:id', requireAdmin, asyncRoute(async (req: Request, 
     include: {
       product: true,
     },
+  });
+  res.json({ data: updated });
+}));
+
+// DELETE /plans/:id - Archive plan instead of deleting financial history (ADMIN only)
+catalogRouter.delete('/plans/:id', requireAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const existing = await db.plan.findUnique({
+    where: { id: req.params.id },
+  });
+  if (!existing) {
+    throw new HttpError(404, 'NOT_FOUND', 'Plan not found');
+  }
+
+  // Archive plan to preserve subscription snapshots and quotation template references
+  const archived = await db.plan.update({
+    where: { id: req.params.id },
+    data: { isActive: false },
+    include: { product: true },
+  });
+
+  res.json({
+    data: {
+      ...archived,
+      archived: true,
+      message: 'Plan archived to preserve subscription and billing history.',
+    },
+  });
+}));
+
+// POST /plans/:id/archive - Explicit archive endpoint (ADMIN only)
+catalogRouter.post('/plans/:id/archive', requireAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const existing = await db.plan.findUnique({ where: { id: req.params.id } });
+  if (!existing) throw new HttpError(404, 'NOT_FOUND', 'Plan not found');
+  const updated = await db.plan.update({
+    where: { id: req.params.id },
+    data: { isActive: false },
+    include: { product: true },
+  });
+  res.json({ data: updated });
+}));
+
+// POST /plans/:id/unarchive - Explicit restore endpoint (ADMIN only)
+catalogRouter.post('/plans/:id/unarchive', requireAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const existing = await db.plan.findUnique({ where: { id: req.params.id } });
+  if (!existing) throw new HttpError(404, 'NOT_FOUND', 'Plan not found');
+  const updated = await db.plan.update({
+    where: { id: req.params.id },
+    data: { isActive: true },
+    include: { product: true },
   });
   res.json({ data: updated });
 }));
@@ -586,13 +731,142 @@ catalogRouter.post('/pricing/calculate', requireStaffOrAdmin, asyncRoute(async (
 }));
 
 // ---------------------------------------------------------------------------
+// Tax Rules Endpoints (Step 4)
+// ---------------------------------------------------------------------------
+
+// GET /taxes - List tax rules with pagination (STAFF or ADMIN)
+catalogRouter.get('/taxes', requireStaffOrAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const query = listTaxesQuerySchema.parse(req.query);
+  const where: Prisma.TaxRuleWhereInput = {};
+
+  if (query.search) {
+    where.name = { contains: query.search };
+  }
+  if (query.isActive !== undefined) {
+    where.isActive = query.isActive === 'true';
+  }
+
+  const [total, items] = await Promise.all([
+    db.taxRule.count({ where }),
+    db.taxRule.findMany({
+      where,
+      skip: (query.page - 1) * query.pageSize,
+      take: query.pageSize,
+      orderBy: { rateBps: 'desc' },
+    }),
+  ]);
+
+  res.json({
+    data: {
+      items,
+      page: query.page,
+      pageSize: query.pageSize,
+      total,
+    },
+  });
+}));
+
+// GET /taxes/:id - Single tax rule details (STAFF or ADMIN)
+catalogRouter.get('/taxes/:id', requireStaffOrAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const taxRule = await db.taxRule.findUnique({
+    where: { id: req.params.id },
+  });
+  if (!taxRule) {
+    throw new HttpError(404, 'NOT_FOUND', 'Tax rule not found');
+  }
+  res.json({ data: taxRule });
+}));
+
+// POST /taxes - Create tax rule (ADMIN only)
+catalogRouter.post('/taxes', requireAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const data = createTaxSchema.parse(req.body);
+  const taxRule = await db.taxRule.create({
+    data: {
+      name: data.name,
+      rateBps: data.rateBps,
+      isActive: data.isActive,
+    },
+  });
+  res.status(201).json({ data: taxRule });
+}));
+
+// PATCH /taxes/:id - Update tax rule (ADMIN only)
+// Note: Future catalog edits must not rewrite issued invoices or snapshot history.
+catalogRouter.patch('/taxes/:id', requireAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const existing = await db.taxRule.findUnique({
+    where: { id: req.params.id },
+  });
+  if (!existing) {
+    throw new HttpError(404, 'NOT_FOUND', 'Tax rule not found');
+  }
+
+  const data = updateTaxSchema.parse(req.body);
+  const updated = await db.taxRule.update({
+    where: { id: req.params.id },
+    data,
+  });
+  res.json({ data: updated });
+}));
+
+// DELETE /taxes/:id - Archive tax rule instead of deleting financial history (ADMIN only)
+catalogRouter.delete('/taxes/:id', requireAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const existing = await db.taxRule.findUnique({
+    where: { id: req.params.id },
+    include: {
+      _count: {
+        select: {
+          subscriptionLines: true,
+          templateLines: true,
+        },
+      },
+    },
+  });
+  if (!existing) {
+    throw new HttpError(404, 'NOT_FOUND', 'Tax rule not found');
+  }
+
+  // Archive tax rule to protect existing subscription/template lines
+  const archived = await db.taxRule.update({
+    where: { id: req.params.id },
+    data: { isActive: false },
+  });
+
+  res.json({
+    data: {
+      ...archived,
+      archived: true,
+      message: 'Tax rule archived to preserve financial records and historical calculations.',
+    },
+  });
+}));
+
+// POST /taxes/:id/archive - Explicit archive endpoint (ADMIN only)
+catalogRouter.post('/taxes/:id/archive', requireAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const existing = await db.taxRule.findUnique({ where: { id: req.params.id } });
+  if (!existing) throw new HttpError(404, 'NOT_FOUND', 'Tax rule not found');
+  const updated = await db.taxRule.update({
+    where: { id: req.params.id },
+    data: { isActive: false },
+  });
+  res.json({ data: updated });
+}));
+
+// POST /taxes/:id/unarchive - Explicit restore endpoint (ADMIN only)
+catalogRouter.post('/taxes/:id/unarchive', requireAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const existing = await db.taxRule.findUnique({ where: { id: req.params.id } });
+  if (!existing) throw new HttpError(404, 'NOT_FOUND', 'Tax rule not found');
+  const updated = await db.taxRule.update({
+    where: { id: req.params.id },
+    data: { isActive: true },
+  });
+  res.json({ data: updated });
+}));
+
+// ---------------------------------------------------------------------------
 // Pending catalog features for future hours (return 501 as required)
 // ---------------------------------------------------------------------------
 
-catalogRouter.all(['/taxes', '/taxes/*'], (_req, res) => {
-  res.status(501).json({ error: { code: 'NOT_IMPLEMENTED', message: 'Tax rules are not implemented yet.' } });
-});
-
+// Step 5 discounts remain pending
 catalogRouter.all(['/discounts', '/discounts/*'], (_req, res) => {
   res.status(501).json({ error: { code: 'NOT_IMPLEMENTED', message: 'Discounts are not implemented yet.' } });
 });

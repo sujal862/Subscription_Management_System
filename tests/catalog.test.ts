@@ -10,7 +10,7 @@ import { ZodError } from 'zod';
 import { HttpError } from '../server/src/lib/http.js';
 import type { ErrorRequestHandler } from 'express';
 
-test('catalog step 1 & 2: products, variants, recurring plans, and primary-line pricing in isolation', async t => {
+test('catalog step 1 to 4: products, variants, plans lifecycle/archive, and tax rules in isolation', async t => {
   const directory = mkdtempSync(path.join(tmpdir(), 'brightloop-catalog-test-'));
   const dbPath = path.join(directory, 'test.db');
   process.env.DATABASE_URL = `file:${dbPath.replaceAll('\\', '/')}`;
@@ -510,19 +510,360 @@ test('catalog step 1 & 2: products, variants, recurring plans, and primary-line 
     });
 
     // -------------------------------------------------------------------------
-    // Remaining future endpoints check
+    // Step 3: Plan Lifecycle Controls, Availability Filter, & Archiving
     // -------------------------------------------------------------------------
 
-    await t.test('future endpoints (taxes, discounts) still return 501', async () => {
-      const endpoints = ['/taxes', '/discounts'];
-      for (const ep of endpoints) {
-        const res = await fetch(`${base}${ep}`, {
-          headers: { 'x-user-role': 'ADMIN' },
-        });
-        assert.equal(res.status, 501, `Expected 501 for ${ep}`);
-        const body = await res.json();
-        assert.equal(body.error.code, 'NOT_IMPLEMENTED');
-      }
+    let lifecyclePlanId = '';
+    await t.test('create plan persists default lifecycle flags (autoClose=true, allowEarlyClose=true, allowPause=false, allowRenew=true)', async () => {
+      const res = await fetch(`${base}/plans`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Default Lifecycle Plan',
+          productId: mainProductId,
+          priceMinor: 199900,
+          interval: 'MONTHLY',
+          minimumQuantity: 1,
+        }),
+      });
+      assert.equal(res.status, 201);
+      const body = await res.json();
+      lifecyclePlanId = body.data.id;
+      assert.equal(body.data.autoClose, true);
+      assert.equal(body.data.allowEarlyClose, true);
+      assert.equal(body.data.allowPause, false);
+      assert.equal(body.data.allowRenew, true);
+      assert.equal(body.data.isActive, true);
+    });
+
+    await t.test('patch plan updates lifecycle controls and availability dates', async () => {
+      const res = await fetch(`${base}/plans/${lifecyclePlanId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          autoClose: false,
+          allowEarlyClose: false,
+          allowPause: true,
+          allowRenew: false,
+          availableFrom: '2026-06-01',
+          availableUntil: '2026-12-31',
+        }),
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.data.autoClose, false);
+      assert.equal(body.data.allowEarlyClose, false);
+      assert.equal(body.data.allowPause, true);
+      assert.equal(body.data.allowRenew, false);
+      assert.equal(body.data.availableFrom.slice(0, 10), '2026-06-01');
+      assert.equal(body.data.availableUntil.slice(0, 10), '2026-12-31');
+    });
+
+    await t.test('GET /plans filters by availableAt selector date', async () => {
+      // 2026-07-15 is inside [2026-06-01, 2026-12-31]
+      const insideRes = await fetch(`${base}/plans?availableAt=2026-07-15`, {
+        headers: { 'x-user-role': 'STAFF' },
+      });
+      assert.equal(insideRes.status, 200);
+      const insideBody = await insideRes.json();
+      const foundInside = insideBody.data.items.some((p: any) => p.id === lifecyclePlanId);
+      assert.equal(foundInside, true);
+
+      // 2026-05-15 is before availableFrom
+      const beforeRes = await fetch(`${base}/plans?availableAt=2026-05-15`, {
+        headers: { 'x-user-role': 'STAFF' },
+      });
+      assert.equal(beforeRes.status, 200);
+      const beforeBody = await beforeRes.json();
+      const foundBefore = beforeBody.data.items.some((p: any) => p.id === lifecyclePlanId);
+      assert.equal(foundBefore, false);
+
+      // 2027-01-01 is after availableUntil
+      const afterRes = await fetch(`${base}/plans?availableAt=2027-01-01`, {
+        headers: { 'x-user-role': 'STAFF' },
+      });
+      assert.equal(afterRes.status, 200);
+      const afterBody = await afterRes.json();
+      const foundAfter = afterBody.data.items.some((p: any) => p.id === lifecyclePlanId);
+      assert.equal(foundAfter, false);
+    });
+
+    await t.test('plan archiving via POST /archive and /unarchive preserves financial history', async () => {
+      // Archive plan
+      const archiveRes = await fetch(`${base}/plans/${lifecyclePlanId}/archive`, {
+        method: 'POST',
+        headers: { 'x-user-role': 'ADMIN' },
+      });
+      assert.equal(archiveRes.status, 200);
+      const archiveBody = await archiveRes.json();
+      assert.equal(archiveBody.data.isActive, false);
+
+      // Inactive plans excluded when isActive=true filter applied
+      const activeListRes = await fetch(`${base}/plans?isActive=true`, {
+        headers: { 'x-user-role': 'STAFF' },
+      });
+      assert.equal(activeListRes.status, 200);
+      const activeListBody = await activeListRes.json();
+      assert.equal(activeListBody.data.items.some((p: any) => p.id === lifecyclePlanId), false);
+
+      // Unarchive plan
+      const unarchiveRes = await fetch(`${base}/plans/${lifecyclePlanId}/unarchive`, {
+        method: 'POST',
+        headers: { 'x-user-role': 'ADMIN' },
+      });
+      assert.equal(unarchiveRes.status, 200);
+      const unarchiveBody = await unarchiveRes.json();
+      assert.equal(unarchiveBody.data.isActive, true);
+
+      // DELETE /plans/:id archives rather than hard deleting
+      const deleteRes = await fetch(`${base}/plans/${lifecyclePlanId}`, {
+        method: 'DELETE',
+        headers: { 'x-user-role': 'ADMIN' },
+      });
+      assert.equal(deleteRes.status, 200);
+      const deleteBody = await deleteRes.json();
+      assert.equal(deleteBody.data.isActive, false);
+      assert.equal(deleteBody.data.archived, true);
+    });
+
+    await t.test('product archiving via POST /archive and /unarchive', async () => {
+      const archiveProdRes = await fetch(`${base}/products/${addonProductId}/archive`, {
+        method: 'POST',
+        headers: { 'x-user-role': 'ADMIN' },
+      });
+      assert.equal(archiveProdRes.status, 200);
+      const archiveProdBody = await archiveProdRes.json();
+      assert.equal(archiveProdBody.data.isActive, false);
+
+      // DELETE /products/:id archives to protect references
+      const deleteProdRes = await fetch(`${base}/products/${addonProductId}`, {
+        method: 'DELETE',
+        headers: { 'x-user-role': 'ADMIN' },
+      });
+      assert.equal(deleteProdRes.status, 200);
+      const deleteProdBody = await deleteProdRes.json();
+      assert.equal(deleteProdBody.data.isActive, false);
+      assert.equal(deleteProdBody.data.archived, true);
+
+      // Restore product
+      const unarchiveProdRes = await fetch(`${base}/products/${addonProductId}/unarchive`, {
+        method: 'POST',
+        headers: { 'x-user-role': 'ADMIN' },
+      });
+      assert.equal(unarchiveProdRes.status, 200);
+      assert.equal((await unarchiveProdRes.json()).data.isActive, true);
+    });
+
+    // -------------------------------------------------------------------------
+    // Step 4: Tax Rules (Basis Points, Role Validation, Archiving)
+    // -------------------------------------------------------------------------
+
+    let gst18Id = '';
+    let exemptTaxId = '';
+
+    await t.test('unauthenticated tax access returns 401', async () => {
+      const res = await fetch(`${base}/taxes`);
+      assert.equal(res.status, 401);
+    });
+
+    await t.test('customer role cannot access or mutate tax rules (403 FORBIDDEN)', async () => {
+      const getRes = await fetch(`${base}/taxes`, {
+        headers: { 'x-user-role': 'CUSTOMER' },
+      });
+      assert.equal(getRes.status, 403);
+
+      const postRes = await fetch(`${base}/taxes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'CUSTOMER' },
+        body: JSON.stringify({ name: 'Hacked Tax', rateBps: 1800 }),
+      });
+      assert.equal(postRes.status, 403);
+    });
+
+    await t.test('staff role can read taxes but cannot mutate (mutations require ADMIN)', async () => {
+      const getRes = await fetch(`${base}/taxes`, {
+        headers: { 'x-user-role': 'STAFF' },
+      });
+      assert.equal(getRes.status, 200);
+
+      const postRes = await fetch(`${base}/taxes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'STAFF' },
+        body: JSON.stringify({ name: 'Unauthorized Tax', rateBps: 1800 }),
+      });
+      assert.equal(postRes.status, 403);
+    });
+
+    await t.test('admin creates valid tax rules with integer basis points (0 to 10000)', async () => {
+      // 18% GST (1800 bps)
+      const gstRes = await fetch(`${base}/taxes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'GST 18%',
+          rateBps: 1800,
+          isActive: true,
+        }),
+      });
+      assert.equal(gstRes.status, 201);
+      const gstBody = await gstRes.json();
+      gst18Id = gstBody.data.id;
+      assert.equal(gstBody.data.name, 'GST 18%');
+      assert.equal(gstBody.data.rateBps, 1800);
+      assert.equal(gstBody.data.isActive, true);
+
+      // 0% Tax Exempt (0 bps is valid)
+      const zeroRes = await fetch(`${base}/taxes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Exempt 0%',
+          rateBps: 0,
+        }),
+      });
+      assert.equal(zeroRes.status, 201);
+      const zeroBody = await zeroRes.json();
+      exemptTaxId = zeroBody.data.id;
+      assert.equal(zeroBody.data.rateBps, 0);
+
+      // 100% Tax (10000 bps max limit)
+      const maxRes = await fetch(`${base}/taxes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Maximum 100%',
+          rateBps: 10000,
+        }),
+      });
+      assert.equal(maxRes.status, 201);
+    });
+
+    await t.test('tax creation rejects negative rates, over 10000 bps, and non-integers', async () => {
+      // Negative basis points
+      const negRes = await fetch(`${base}/taxes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({ name: 'Negative', rateBps: -50 }),
+      });
+      assert.equal(negRes.status, 400);
+
+      // Over 10000 basis points (> 100%)
+      const overRes = await fetch(`${base}/taxes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({ name: 'Too High', rateBps: 10001 }),
+      });
+      assert.equal(overRes.status, 400);
+
+      // Non-integer basis points (e.g. 18.5)
+      const floatRes = await fetch(`${base}/taxes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({ name: 'Float Rate', rateBps: 18.5 }),
+      });
+      assert.equal(floatRes.status, 400);
+
+      // Empty name
+      const emptyNameRes = await fetch(`${base}/taxes`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({ name: '', rateBps: 500 }),
+      });
+      assert.equal(emptyNameRes.status, 400);
+    });
+
+    await t.test('GET /taxes returns paginated envelope compatible with Member 3 subscription selector', async () => {
+      const res = await fetch(`${base}/taxes?page=1&pageSize=10`, {
+        headers: { 'x-user-role': 'STAFF' },
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.ok(Array.isArray(body.data.items));
+      assert.equal(typeof body.data.total, 'number');
+      assert.equal(body.data.page, 1);
+      assert.equal(body.data.pageSize, 10);
+      assert.ok(body.data.items.length >= 2);
+
+      // Test search filter
+      const searchRes = await fetch(`${base}/taxes?search=GST`, {
+        headers: { 'x-user-role': 'STAFF' },
+      });
+      assert.equal(searchRes.status, 200);
+      const searchBody = await searchRes.json();
+      assert.ok(searchBody.data.items.some((t: any) => t.id === gst18Id));
+    });
+
+    await t.test('GET /taxes/:id returns single tax rule', async () => {
+      const res = await fetch(`${base}/taxes/${gst18Id}`, {
+        headers: { 'x-user-role': 'STAFF' },
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.data.id, gst18Id);
+      assert.equal(body.data.rateBps, 1800);
+    });
+
+    await t.test('PATCH /taxes/:id updates tax rule', async () => {
+      const res = await fetch(`${base}/taxes/${gst18Id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'GST 18% (Standard)',
+          rateBps: 1800,
+        }),
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.equal(body.data.name, 'GST 18% (Standard)');
+    });
+
+    await t.test('tax rule archiving via POST /archive, /unarchive, and DELETE /taxes/:id', async () => {
+      // Archive tax rule
+      const archiveRes = await fetch(`${base}/taxes/${exemptTaxId}/archive`, {
+        method: 'POST',
+        headers: { 'x-user-role': 'ADMIN' },
+      });
+      assert.equal(archiveRes.status, 200);
+      assert.equal((await archiveRes.json()).data.isActive, false);
+
+      // Filter active taxes excludes archived rule
+      const activeListRes = await fetch(`${base}/taxes?isActive=true`, {
+        headers: { 'x-user-role': 'STAFF' },
+      });
+      assert.equal(activeListRes.status, 200);
+      const activeListBody = await activeListRes.json();
+      assert.equal(activeListBody.data.items.some((t: any) => t.id === exemptTaxId), false);
+
+      // Restore tax rule
+      const unarchiveRes = await fetch(`${base}/taxes/${exemptTaxId}/unarchive`, {
+        method: 'POST',
+        headers: { 'x-user-role': 'ADMIN' },
+      });
+      assert.equal(unarchiveRes.status, 200);
+      assert.equal((await unarchiveRes.json()).data.isActive, true);
+
+      // DELETE /taxes/:id sets isActive=false without deleting invoice snapshot history
+      const deleteRes = await fetch(`${base}/taxes/${exemptTaxId}`, {
+        method: 'DELETE',
+        headers: { 'x-user-role': 'ADMIN' },
+      });
+      assert.equal(deleteRes.status, 200);
+      const deleteBody = await deleteRes.json();
+      assert.equal(deleteBody.data.isActive, false);
+      assert.equal(deleteBody.data.archived, true);
+    });
+
+    // -------------------------------------------------------------------------
+    // Step 5 discounts remain pending
+    // -------------------------------------------------------------------------
+
+    await t.test('Step 5 discounts still return 501 NOT_IMPLEMENTED', async () => {
+      const res = await fetch(`${base}/discounts`, {
+        headers: { 'x-user-role': 'ADMIN' },
+      });
+      assert.equal(res.status, 501);
+      const body = await res.json();
+      assert.equal(body.error.code, 'NOT_IMPLEMENTED');
     });
   } finally {
     server.closeAllConnections();
