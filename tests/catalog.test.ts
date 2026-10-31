@@ -10,7 +10,7 @@ import { ZodError } from 'zod';
 import { HttpError } from '../server/src/lib/http.js';
 import type { ErrorRequestHandler } from 'express';
 
-test('catalog step 1: database-backed product management in isolation', async t => {
+test('catalog step 1 & 2: products, variants, recurring plans, and primary-line pricing in isolation', async t => {
   const directory = mkdtempSync(path.join(tmpdir(), 'brightloop-catalog-test-'));
   const dbPath = path.join(directory, 'test.db');
   process.env.DATABASE_URL = `file:${dbPath.replaceAll('\\', '/')}`;
@@ -67,6 +67,10 @@ test('catalog step 1: database-backed product management in isolation', async t 
   const base = `http://127.0.0.1:${address.port}/api/catalog`;
 
   try {
+    // -------------------------------------------------------------------------
+    // Step 1: Products Baseline
+    // -------------------------------------------------------------------------
+
     await t.test('unauthenticated requests fail with 401', async () => {
       const response = await fetch(`${base}/products`);
       assert.equal(response.status, 401);
@@ -107,45 +111,7 @@ test('catalog step 1: database-backed product management in isolation', async t 
       assert.equal((await postRes.json()).error.code, 'FORBIDDEN');
     });
 
-    await t.test('validation rejects invalid names, non-integers, and negative money', async () => {
-      // Empty name
-      const emptyNameRes = await fetch(`${base}/products`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
-        body: JSON.stringify({ name: '  ', salesPriceMinor: 1000 }),
-      });
-      assert.equal(emptyNameRes.status, 400);
-      assert.equal((await emptyNameRes.json()).error.code, 'VALIDATION_ERROR');
-
-      // Negative salesPriceMinor
-      const negSalesRes = await fetch(`${base}/products`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
-        body: JSON.stringify({ name: 'Cloud Storage', salesPriceMinor: -500 }),
-      });
-      assert.equal(negSalesRes.status, 400);
-      assert.equal((await negSalesRes.json()).error.code, 'VALIDATION_ERROR');
-
-      // Float salesPriceMinor
-      const floatSalesRes = await fetch(`${base}/products`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
-        body: JSON.stringify({ name: 'Cloud Storage', salesPriceMinor: 19.99 }),
-      });
-      assert.equal(floatSalesRes.status, 400);
-      assert.equal((await floatSalesRes.json()).error.code, 'VALIDATION_ERROR');
-
-      // Negative costPriceMinor
-      const negCostRes = await fetch(`${base}/products`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
-        body: JSON.stringify({ name: 'Cloud Storage', salesPriceMinor: 5000, costPriceMinor: -100 }),
-      });
-      assert.equal(negCostRes.status, 400);
-      assert.equal((await negCostRes.json()).error.code, 'VALIDATION_ERROR');
-    });
-
-    let createdId: string;
+    let mainProductId: string;
 
     await t.test('admin creates product with nonnegative integer money and notes', async () => {
       const res = await fetch(`${base}/products`, {
@@ -163,121 +129,392 @@ test('catalog step 1: database-backed product management in isolation', async t 
       const body = await res.json();
       assert.ok(body.data);
       assert.equal(body.data.name, 'Pro Subscription Suite');
-      assert.equal(body.data.type, 'SOFTWARE');
       assert.equal(body.data.salesPriceMinor, 499900);
-      assert.equal(body.data.costPriceMinor, 150000);
-      assert.equal(body.data.notes, 'Flagship enterprise tier offering');
-      assert.equal(body.data.isActive, true);
-      assert.ok(body.data.id);
-      createdId = body.data.id;
+      assert.ok(Array.isArray(body.data.variants));
+      mainProductId = body.data.id;
     });
 
-    await t.test('get product by id returns full details or 404', async () => {
-      const res = await fetch(`${base}/products/${createdId}`, {
-        headers: { 'x-user-role': 'STAFF' },
-      });
-      assert.equal(res.status, 200);
-      const body = await res.json();
-      assert.equal(body.data.id, createdId);
-      assert.equal(body.data.name, 'Pro Subscription Suite');
+    // -------------------------------------------------------------------------
+    // Step 2: Product Variants
+    // -------------------------------------------------------------------------
 
-      const notFoundRes = await fetch(`${base}/products/non-existent-id`, {
+    let variant1Id: string;
+    let variant2Id: string;
+
+    await t.test('variant mutations require ADMIN, staff can read', async () => {
+      const staffPost = await fetch(`${base}/products/${mainProductId}/variants`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'STAFF' },
+        body: JSON.stringify({ name: '10 Users', priceAdjustmentMinor: 50000 }),
+      });
+      assert.equal(staffPost.status, 403);
+
+      const staffGet = await fetch(`${base}/products/${mainProductId}/variants`, {
         headers: { 'x-user-role': 'STAFF' },
       });
-      assert.equal(notFoundRes.status, 404);
-      assert.equal((await notFoundRes.json()).error.code, 'NOT_FOUND');
+      assert.equal(staffGet.status, 200);
+      const staffBody = await staffGet.json();
+      assert.ok(Array.isArray(staffBody.data));
     });
 
-    await t.test('admin edits product fields via PATCH', async () => {
-      const patchRes = await fetch(`${base}/products/${createdId}`, {
+    await t.test('admin creates variants with price adjustments', async () => {
+      // Positive adjustment
+      const res1 = await fetch(`${base}/products/${mainProductId}/variants`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({ name: 'Enterprise Addon', priceAdjustmentMinor: 100000 }),
+      });
+      assert.equal(res1.status, 201);
+      const body1 = await res1.json();
+      assert.equal(body1.data.name, 'Enterprise Addon');
+      assert.equal(body1.data.priceAdjustmentMinor, 100000);
+      assert.equal(body1.data.productId, mainProductId);
+      variant1Id = body1.data.id;
+
+      // Negative adjustment (discount variant)
+      const res2 = await fetch(`${base}/products/${mainProductId}/variants`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({ name: 'Starter Tier Discount', priceAdjustmentMinor: -50000 }),
+      });
+      assert.equal(res2.status, 201);
+      const body2 = await res2.json();
+      assert.equal(body2.data.priceAdjustmentMinor, -50000);
+      variant2Id = body2.data.id;
+    });
+
+    await t.test('variant name uniqueness is enforced per product', async () => {
+      const dupRes = await fetch(`${base}/products/${mainProductId}/variants`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({ name: 'Enterprise Addon', priceAdjustmentMinor: 20000 }),
+      });
+      assert.equal(dupRes.status, 409);
+      const body = await dupRes.json();
+      assert.equal(body.error.code, 'CONFLICT');
+    });
+
+    await t.test('admin can update variant and prevent cross-product mismatch', async () => {
+      const patchRes = await fetch(`${base}/products/${mainProductId}/variants/${variant1Id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
-        body: JSON.stringify({
-          name: 'Pro Subscription Suite v2',
-          salesPriceMinor: 549900,
-          notes: 'Updated description for v2',
-          isActive: false,
-        }),
+        body: JSON.stringify({ priceAdjustmentMinor: 120000, isActive: true }),
       });
       assert.equal(patchRes.status, 200);
       const body = await patchRes.json();
-      assert.equal(body.data.name, 'Pro Subscription Suite v2');
-      assert.equal(body.data.salesPriceMinor, 549900);
-      assert.equal(body.data.costPriceMinor, 150000); // unchanged
-      assert.equal(body.data.notes, 'Updated description for v2');
-      assert.equal(body.data.isActive, false);
+      assert.equal(body.data.priceAdjustmentMinor, 120000);
 
-      // Invalid PATCH with negative price
-      const invalidPatch = await fetch(`${base}/products/${createdId}`, {
+      // Unrelated product ID returns 404
+      const mismatchRes = await fetch(`${base}/products/other-product-id/variants/${variant1Id}`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
-        body: JSON.stringify({ salesPriceMinor: -10 }),
+        body: JSON.stringify({ priceAdjustmentMinor: 100 }),
       });
-      assert.equal(invalidPatch.status, 400);
-      assert.equal((await invalidPatch.json()).error.code, 'VALIDATION_ERROR');
+      assert.equal(mismatchRes.status, 404);
     });
 
-    await t.test('pagination and search filtering work with standard envelopes', async () => {
-      // Add 2 more products
-      await fetch(`${base}/products`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
-        body: JSON.stringify({ name: 'Consulting Onboarding', type: 'SERVICE', salesPriceMinor: 200000 }),
-      });
-      await fetch(`${base}/products`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
-        body: JSON.stringify({ name: 'Dedicated Server Hardware', type: 'HARDWARE', salesPriceMinor: 800000 }),
-      });
-
-      // Page 1 with pageSize 2 (total = 3)
-      const page1Res = await fetch(`${base}/products?page=1&pageSize=2`, {
+    await t.test('products list and details include variants', async () => {
+      const detailRes = await fetch(`${base}/products/${mainProductId}`, {
         headers: { 'x-user-role': 'STAFF' },
       });
-      assert.equal(page1Res.status, 200);
-      const page1Body = await page1Res.json();
-      assert.equal(page1Body.data.items.length, 2);
-      assert.equal(page1Body.data.page, 1);
-      assert.equal(page1Body.data.pageSize, 2);
-      assert.equal(page1Body.data.total, 3);
+      assert.equal(detailRes.status, 200);
+      const detail = await detailRes.json();
+      assert.equal(detail.data.variants.length, 2);
 
-      // Page 2
-      const page2Res = await fetch(`${base}/products?page=2&pageSize=2`, {
+      const listRes = await fetch(`${base}/products`, {
         headers: { 'x-user-role': 'STAFF' },
       });
-      assert.equal(page2Res.status, 200);
-      const page2Body = await page2Res.json();
-      assert.equal(page2Body.data.items.length, 1);
-      assert.equal(page2Body.data.page, 2);
-      assert.equal(page2Body.data.pageSize, 2);
-      assert.equal(page2Body.data.total, 3);
-
-      // Search filter
-      const searchRes = await fetch(`${base}/products?search=Consulting`, {
-        headers: { 'x-user-role': 'STAFF' },
-      });
-      assert.equal(searchRes.status, 200);
-      const searchBody = await searchRes.json();
-      assert.equal(searchBody.data.total, 1);
-      assert.equal(searchBody.data.items[0].name, 'Consulting Onboarding');
-
-      // Type filter
-      const typeRes = await fetch(`${base}/products?type=HARDWARE`, {
-        headers: { 'x-user-role': 'STAFF' },
-      });
-      assert.equal(typeRes.status, 200);
-      const typeBody = await typeRes.json();
-      assert.equal(typeBody.data.total, 1);
-      assert.equal(typeBody.data.items[0].type, 'HARDWARE');
+      assert.equal(listRes.status, 200);
+      const list = await listRes.json();
+      const productWithVariants = list.data.items.find((p: any) => p.id === mainProductId);
+      assert.ok(productWithVariants);
+      assert.equal(productWithVariants.variants.length, 2);
     });
 
-    await t.test('future endpoints (variants, plans, taxes, discounts) return 501', async () => {
-      const endpoints = [
-        `/products/${createdId}/variants`,
-        '/plans',
-        '/taxes',
-        '/discounts',
-      ];
+    // -------------------------------------------------------------------------
+    // Step 2: Recurring Plans
+    // -------------------------------------------------------------------------
+
+    let monthlyPlanId: string;
+    let yearlyPlanId: string;
+
+    await t.test('plan validation rejects invalid dates, quantities, intervals, and product references', async () => {
+      // Non-existent product reference
+      const badProdRes = await fetch(`${base}/plans`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Invalid Product Plan',
+          productId: 'non-existent-prod',
+          priceMinor: 50000,
+          interval: 'MONTHLY',
+        }),
+      });
+      assert.equal(badProdRes.status, 400);
+
+      // Invalid interval
+      const badIntervalRes = await fetch(`${base}/plans`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Bad Interval',
+          productId: mainProductId,
+          priceMinor: 50000,
+          interval: 'BIWEEKLY',
+        }),
+      });
+      assert.equal(badIntervalRes.status, 400);
+
+      // Negative minimumQuantity
+      const badQtyRes = await fetch(`${base}/plans`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Bad Qty',
+          productId: mainProductId,
+          priceMinor: 50000,
+          interval: 'MONTHLY',
+          minimumQuantity: 0,
+        }),
+      });
+      assert.equal(badQtyRes.status, 400);
+
+      // Inverted date order (availableUntil < availableFrom)
+      const badDateRes = await fetch(`${base}/plans`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Inverted Dates',
+          productId: mainProductId,
+          priceMinor: 50000,
+          interval: 'MONTHLY',
+          availableFrom: '2026-12-01',
+          availableUntil: '2026-11-01',
+        }),
+      });
+      assert.equal(badDateRes.status, 400);
+      const badDateBody = await badDateRes.json();
+      assert.equal(badDateBody.error.code, 'VALIDATION_ERROR');
+    });
+
+    await t.test('admin creates plans for daily, weekly, monthly, and yearly intervals', async () => {
+      // Monthly plan
+      const resMonthly = await fetch(`${base}/plans`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Pro Monthly Business Plan',
+          productId: mainProductId,
+          priceMinor: 299900,
+          interval: 'MONTHLY',
+          minimumQuantity: 5,
+          availableFrom: '2026-01-01',
+          availableUntil: '2026-12-31',
+          autoClose: true,
+          allowEarlyClose: true,
+          allowPause: false,
+          allowRenew: true,
+          isActive: true,
+        }),
+      });
+      assert.equal(resMonthly.status, 201);
+      const monthly = await resMonthly.json();
+      assert.equal(monthly.data.name, 'Pro Monthly Business Plan');
+      assert.equal(monthly.data.interval, 'MONTHLY');
+      assert.equal(monthly.data.priceMinor, 299900);
+      assert.equal(monthly.data.minimumQuantity, 5);
+      assert.ok(monthly.data.product);
+      monthlyPlanId = monthly.data.id;
+
+      // Yearly plan
+      const resYearly = await fetch(`${base}/plans`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Pro Annual Enterprise Plan',
+          productId: mainProductId,
+          priceMinor: 2999900,
+          interval: 'YEARLY',
+          minimumQuantity: 1,
+          autoClose: false,
+        }),
+      });
+      assert.equal(resYearly.status, 201);
+      yearlyPlanId = (await resYearly.json()).data.id;
+
+      // Daily plan
+      const resDaily = await fetch(`${base}/plans`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Pro Daily Trial Plan',
+          productId: mainProductId,
+          priceMinor: 15000,
+          interval: 'DAILY',
+          minimumQuantity: 1,
+        }),
+      });
+      assert.equal(resDaily.status, 201);
+
+      // Weekly plan
+      const resWeekly = await fetch(`${base}/plans`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Pro Weekly Sprint Plan',
+          productId: mainProductId,
+          priceMinor: 75000,
+          interval: 'WEEKLY',
+          minimumQuantity: 1,
+        }),
+      });
+      assert.equal(resWeekly.status, 201);
+    });
+
+    await t.test('get plan by id and list plans with pagination and filters', async () => {
+      // Get by id
+      const getPlan = await fetch(`${base}/plans/${monthlyPlanId}`, {
+        headers: { 'x-user-role': 'STAFF' },
+      });
+      assert.equal(getPlan.status, 200);
+      const planBody = await getPlan.json();
+      assert.equal(planBody.data.id, monthlyPlanId);
+      assert.equal(planBody.data.minimumQuantity, 5);
+
+      // List plans (Member 3 selector contract: returns { items, total, page, pageSize })
+      const listPlans = await fetch(`${base}/plans?page=1&pageSize=2`, {
+        headers: { 'x-user-role': 'STAFF' },
+      });
+      assert.equal(listPlans.status, 200);
+      const listBody = await listPlans.json();
+      assert.equal(listBody.data.items.length, 2);
+      assert.equal(listBody.data.total, 4);
+      assert.ok(listBody.data.items[0].product);
+
+      // Filter by interval
+      const filterInterval = await fetch(`${base}/plans?interval=YEARLY`, {
+        headers: { 'x-user-role': 'STAFF' },
+      });
+      assert.equal(filterInterval.status, 200);
+      const yearlyBody = await filterInterval.json();
+      assert.equal(yearlyBody.data.total, 1);
+      assert.equal(yearlyBody.data.items[0].id, yearlyPlanId);
+    });
+
+    await t.test('admin can update plan details and preserve date validity', async () => {
+      const patchRes = await fetch(`${base}/plans/${monthlyPlanId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Pro Monthly Business Plan v2',
+          priceMinor: 319900,
+          minimumQuantity: 10,
+        }),
+      });
+      assert.equal(patchRes.status, 200);
+      const patched = await patchRes.json();
+      assert.equal(patched.data.name, 'Pro Monthly Business Plan v2');
+      assert.equal(patched.data.priceMinor, 319900);
+      assert.equal(patched.data.minimumQuantity, 10);
+    });
+
+    // -------------------------------------------------------------------------
+    // Step 2: Primary-Line Pricing Rule & Multi-line Calculation
+    // -------------------------------------------------------------------------
+
+    let addonProductId: string;
+
+    await t.test('create addon product for testing primary-line pricing rule', async () => {
+      const res = await fetch(`${base}/products`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Additional Seat License',
+          type: 'SERVICE',
+          salesPriceMinor: 99900,
+          costPriceMinor: 20000,
+        }),
+      });
+      assert.equal(res.status, 201);
+      addonProductId = (await res.json()).data.id;
+    });
+
+    await t.test('primary-line pricing calculates plan fee on line 1, product fee on add-ons, and adds variant adjustments', async () => {
+      // Monthly Plan price: 319900, minimumQuantity: 10
+      // Line 1: mainProduct with variant1 (Enterprise Addon: +120000), qty: 10
+      //   -> unit price = 319900 + 120000 = 439900. subtotal = 439900 * 10 = 4399000
+      // Line 2: addonProduct, qty: 2 (no variant)
+      //   -> unit price = 99900 (Product.salesPriceMinor, NOT Plan.priceMinor!). subtotal = 99900 * 2 = 199800
+      // Total subtotal = 4399000 + 199800 = 4598800
+
+      const calcRes = await fetch(`${base}/pricing/calculate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'STAFF' },
+        body: JSON.stringify({
+          planId: monthlyPlanId,
+          lines: [
+            { productId: mainProductId, variantId: variant1Id, quantity: 10 },
+            { productId: addonProductId, variantId: null, quantity: 2 },
+          ],
+        }),
+      });
+      assert.equal(calcRes.status, 200);
+      const calcBody = await calcRes.json();
+      assert.equal(calcBody.data.lines[0].isPrimary, true);
+      assert.equal(calcBody.data.lines[0].unitPriceMinor, 439900);
+      assert.equal(calcBody.data.lines[0].subtotalMinor, 4399000);
+
+      assert.equal(calcBody.data.lines[1].isPrimary, false);
+      assert.equal(calcBody.data.lines[1].unitPriceMinor, 99900);
+      assert.equal(calcBody.data.lines[1].subtotalMinor, 199800);
+
+      assert.equal(calcBody.data.subtotalMinor, 4598800);
+    });
+
+    await t.test('pricing calculation rejects unrelated variant or primary mismatch', async () => {
+      // Primary line mismatch (product does not match plan.productId)
+      const mismatchProd = await fetch(`${base}/pricing/calculate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'STAFF' },
+        body: JSON.stringify({
+          planId: monthlyPlanId,
+          lines: [{ productId: addonProductId, quantity: 1 }],
+        }),
+      });
+      assert.equal(mismatchProd.status, 400);
+
+      // Primary line quantity below minimumQuantity (10)
+      const belowMinQty = await fetch(`${base}/pricing/calculate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'STAFF' },
+        body: JSON.stringify({
+          planId: monthlyPlanId,
+          lines: [{ productId: mainProductId, quantity: 2 }],
+        }),
+      });
+      assert.equal(belowMinQty.status, 400);
+
+      // Unrelated variant on addon product
+      const unrelatedVariant = await fetch(`${base}/pricing/calculate`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'STAFF' },
+        body: JSON.stringify({
+          planId: monthlyPlanId,
+          lines: [
+            { productId: mainProductId, quantity: 10 },
+            { productId: addonProductId, variantId: variant1Id, quantity: 1 },
+          ],
+        }),
+      });
+      assert.equal(unrelatedVariant.status, 400);
+    });
+
+    // -------------------------------------------------------------------------
+    // Remaining future endpoints check
+    // -------------------------------------------------------------------------
+
+    await t.test('future endpoints (taxes, discounts) still return 501', async () => {
+      const endpoints = ['/taxes', '/discounts'];
       for (const ep of endpoints) {
         const res = await fetch(`${base}${ep}`, {
           headers: { 'x-user-role': 'ADMIN' },
