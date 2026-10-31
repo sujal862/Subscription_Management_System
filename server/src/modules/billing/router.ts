@@ -2,7 +2,14 @@ import { Router, type RequestHandler } from 'express';
 import { z } from 'zod';
 import { pendingRouter } from '../../lib/pending-router.js';
 import { asyncRoute, HttpError } from '../../lib/http.js';
-import { listInvoices, getInvoiceById } from './service.js';
+import {
+  listInvoices,
+  getInvoiceById,
+  confirmInvoice,
+  cancelInvoice,
+  recordPayment,
+  listPaymentsForInvoice,
+} from './service.js';
 import { calculateInvoice, type LineCalculationInput } from './calculation.js';
 import { runBillingCycle } from './recurring.js';
 import { db } from '../../lib/db.js';
@@ -26,6 +33,7 @@ const listInvoicesQuerySchema = z.object({
   pageSize: z.coerce.number().int().positive().max(100).optional().default(20),
   status: z.enum(['DRAFT', 'CONFIRMED', 'PAID', 'CANCELLED'] as const).optional(),
   customerId: z.string().optional(),
+  overdue: z.preprocess(v => v === 'true' || v === true, z.boolean().optional()),
 });
 
 // GET /api/billing/invoices - Paginated invoice list with search/filters
@@ -36,6 +44,7 @@ billingRouter.get('/invoices', asyncRoute(async (req, res) => {
     pageSize: query.pageSize,
     status: query.status as InvoiceStatus | undefined,
     customerId: query.customerId,
+    overdue: query.overdue,
   });
 
   res.json({ data: result });
@@ -45,6 +54,47 @@ billingRouter.get('/invoices', asyncRoute(async (req, res) => {
 billingRouter.get('/invoices/:id', asyncRoute(async (req, res) => {
   const invoice = await getInvoiceById(req.params.id);
   res.json({ data: invoice });
+}));
+
+// POST /api/billing/invoices/:id/confirm - Transition invoice from DRAFT to CONFIRMED
+billingRouter.post('/invoices/:id/confirm', asyncRoute(async (req, res) => {
+  const invoice = await confirmInvoice(req.params.id);
+  res.json({ data: invoice });
+}));
+
+// POST /api/billing/invoices/:id/cancel - Cancel invoice (blocks if payments exist)
+billingRouter.post('/invoices/:id/cancel', asyncRoute(async (req, res) => {
+  const invoice = await cancelInvoice(req.params.id);
+  res.json({ data: invoice });
+}));
+
+const recordPaymentSchema = z.object({
+  method: z.string().min(1, 'Payment method is required'),
+  amountMinor: z.number().int().positive('Payment amount must be a positive integer in paise'),
+  paidAt: z.string().optional(),
+  note: z.string().optional(),
+  reference: z.string().optional(),
+});
+
+// GET /api/billing/invoices/:id/payments - List recorded payments for invoice
+billingRouter.get('/invoices/:id/payments', asyncRoute(async (req, res) => {
+  const result = await listPaymentsForInvoice(req.params.id);
+  res.json({ data: result });
+}));
+
+// POST /api/billing/invoices/:id/payments - Record a payment against an invoice
+billingRouter.post('/invoices/:id/payments', asyncRoute(async (req, res) => {
+  const body = recordPaymentSchema.parse(req.body);
+  const paidAt = body.paidAt ? new Date(body.paidAt) : undefined;
+  const result = await recordPayment(req.params.id, {
+    method: body.method,
+    amountMinor: body.amountMinor,
+    paidAt,
+    note: body.note,
+    reference: body.reference,
+  });
+
+  res.status(201).json({ data: result });
 }));
 
 const previewInvoiceSchema = z.object({

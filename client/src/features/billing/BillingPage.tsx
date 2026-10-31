@@ -24,6 +24,17 @@ interface InvoicePayment {
   note?: string | null;
 }
 
+interface DiscountRedemptionItem {
+  id: string;
+  amountMinor: number;
+  discount: {
+    id: string;
+    name: string;
+    kind: string;
+    value: number;
+  };
+}
+
 interface InvoiceItem {
   id: string;
   number: string;
@@ -45,6 +56,7 @@ interface InvoiceItem {
   isOverdue: boolean;
   lines?: InvoiceLineItem[];
   payments?: InvoicePayment[];
+  discountRedemptions?: DiscountRedemptionItem[];
 }
 
 interface InvoicesResponse {
@@ -67,17 +79,28 @@ export function BillingPage() {
   const [totalCount, setTotalCount] = useState(0);
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState<string>('ALL');
+  const [overdueOnly, setOverdueOnly] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   const [selectedInvoice, setSelectedInvoice] = useState<InvoiceItem | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [actionLoading, setActionLoading] = useState(false);
 
   // Billing Run modal & state
   const [runningBilling, setRunningBilling] = useState(false);
   const [runMessage, setRunMessage] = useState<string | null>(null);
   const [showRunModal, setShowRunModal] = useState(false);
   const [runTargetDate, setRunTargetDate] = useState<string>(new Date().toISOString().split('T')[0]);
+
+  // Payment Recording modal & state
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [paymentAmountMajor, setPaymentAmountMajor] = useState<string>('');
+  const [paymentMethod, setPaymentMethod] = useState<string>('BANK_TRANSFER');
+  const [paymentReference, setPaymentReference] = useState<string>('');
+  const [paymentNote, setPaymentNote] = useState<string>('');
+  const [paymentDate, setPaymentDate] = useState<string>(new Date().toISOString().split('T')[0]);
+  const [recordingPayment, setRecordingPayment] = useState(false);
 
   const fetchInvoices = useCallback(async () => {
     setLoading(true);
@@ -86,7 +109,9 @@ export function BillingPage() {
       const queryParams = new URLSearchParams();
       queryParams.set('page', String(page));
       queryParams.set('pageSize', '20');
-      if (statusFilter !== 'ALL') {
+      if (overdueOnly) {
+        queryParams.set('overdue', 'true');
+      } else if (statusFilter !== 'ALL') {
         queryParams.set('status', statusFilter);
       }
       const data = await api<InvoicesResponse>(`/billing/invoices?${queryParams.toString()}`);
@@ -97,7 +122,7 @@ export function BillingPage() {
     } finally {
       setLoading(false);
     }
-  }, [page, statusFilter]);
+  }, [page, statusFilter, overdueOnly]);
 
   useEffect(() => {
     fetchInvoices();
@@ -112,6 +137,83 @@ export function BillingPage() {
       alert(`Could not load invoice: ${errorMessage(err)}`);
     } finally {
       setDetailLoading(false);
+    }
+  };
+
+  const openPaymentModal = (invoice: InvoiceItem) => {
+    setSelectedInvoice(invoice);
+    setPaymentAmountMajor((invoice.remainingBalanceMinor / 100).toFixed(2));
+    setPaymentMethod('BANK_TRANSFER');
+    setPaymentReference('');
+    setPaymentNote('');
+    setPaymentDate(new Date().toISOString().split('T')[0]);
+    setShowPaymentModal(true);
+  };
+
+  const handleRecordPayment = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!selectedInvoice) return;
+
+    const parsed = parseFloat(paymentAmountMajor);
+    const amountMinor = Math.round(parsed * 100);
+    if (isNaN(parsed) || amountMinor <= 0) {
+      alert('Please enter a valid positive payment amount');
+      return;
+    }
+    if (amountMinor > selectedInvoice.remainingBalanceMinor) {
+      alert(`Amount exceeds remaining balance of ${formatMoney(selectedInvoice.remainingBalanceMinor)}`);
+      return;
+    }
+
+    setRecordingPayment(true);
+    try {
+      await api(`/billing/invoices/${selectedInvoice.id}/payments`, {
+        method: 'POST',
+        body: JSON.stringify({
+          method: paymentMethod,
+          amountMinor,
+          paidAt: paymentDate ? `${paymentDate}T12:00:00.000Z` : undefined,
+          reference: paymentReference.trim() || undefined,
+          note: paymentNote.trim() || undefined,
+        }),
+      });
+
+      setShowPaymentModal(false);
+      await fetchInvoices();
+      const updated = await api<InvoiceItem>(`/billing/invoices/${selectedInvoice.id}`);
+      setSelectedInvoice(updated);
+    } catch (err) {
+      alert(`Payment recording failed: ${errorMessage(err)}`);
+    } finally {
+      setRecordingPayment(false);
+    }
+  };
+
+  const handleConfirmInvoice = async (id: string) => {
+    if (!confirm('Are you sure you want to confirm this invoice?')) return;
+    setActionLoading(true);
+    try {
+      const updated = await api<InvoiceItem>(`/billing/invoices/${id}/confirm`, { method: 'POST' });
+      setSelectedInvoice(updated);
+      await fetchInvoices();
+    } catch (err) {
+      alert(`Could not confirm invoice: ${errorMessage(err)}`);
+    } finally {
+      setActionLoading(false);
+    }
+  };
+
+  const handleCancelInvoice = async (id: string) => {
+    if (!confirm('Are you sure you want to cancel this invoice? This cannot be undone.')) return;
+    setActionLoading(true);
+    try {
+      const updated = await api<InvoiceItem>(`/billing/invoices/${id}/cancel`, { method: 'POST' });
+      setSelectedInvoice(updated);
+      await fetchInvoices();
+    } catch (err) {
+      alert(`Could not cancel invoice: ${errorMessage(err)}`);
+    } finally {
+      setActionLoading(false);
     }
   };
 
@@ -197,6 +299,7 @@ export function BillingPage() {
             id="statusFilter"
             className="filter-select"
             value={statusFilter}
+            disabled={overdueOnly}
             onChange={e => {
               setStatusFilter(e.target.value);
               setPage(1);
@@ -208,6 +311,20 @@ export function BillingPage() {
             <option value="PAID">Paid</option>
             <option value="CANCELLED">Cancelled</option>
           </select>
+
+          <label style={{ display: 'flex', alignItems: 'center', gap: 6, fontSize: '0.85rem', cursor: 'pointer', marginLeft: 16 }}>
+            <input
+              type="checkbox"
+              checked={overdueOnly}
+              onChange={e => {
+                setOverdueOnly(e.target.checked);
+                setPage(1);
+              }}
+            />
+            <span style={{ color: overdueOnly ? '#b91c1c' : 'inherit', fontWeight: overdueOnly ? 600 : 'normal' }}>
+              ⚠️ Overdue Invoices Only
+            </span>
+          </label>
         </div>
       </div>
 
@@ -227,7 +344,9 @@ export function BillingPage() {
             <span className="empty-symbol">🧾</span>
             <h2>No invoices found</h2>
             <p className="muted">
-              {statusFilter !== 'ALL'
+              {overdueOnly
+                ? 'There are no overdue invoices at this time.'
+                : statusFilter !== 'ALL'
                 ? `There are no invoices matching the "${statusFilter}" filter.`
                 : 'Invoices will appear here once generated from active customer subscriptions.'}
             </p>
@@ -272,7 +391,7 @@ export function BillingPage() {
                     </td>
                     <td>
                       {inv.remainingBalanceMinor > 0 ? (
-                        <span style={{ color: '#92400e' }}>{formatMoney(inv.remainingBalanceMinor)}</span>
+                        <span style={{ color: '#92400e', fontWeight: 600 }}>{formatMoney(inv.remainingBalanceMinor)}</span>
                       ) : (
                         <span className="muted">₹0.00</span>
                       )}
@@ -281,14 +400,25 @@ export function BillingPage() {
                       <span className={`status-badge status-${inv.status}`}>{inv.status}</span>
                     </td>
                     <td>
-                      <button
-                        className="btn-secondary"
-                        style={{ padding: '4px 10px', fontSize: '0.78rem' }}
-                        onClick={() => viewInvoiceDetail(inv.id)}
-                        disabled={detailLoading}
-                      >
-                        View Details
-                      </button>
+                      <div style={{ display: 'flex', gap: 6 }}>
+                        <button
+                          className="btn-secondary"
+                          style={{ padding: '4px 10px', fontSize: '0.78rem' }}
+                          onClick={() => viewInvoiceDetail(inv.id)}
+                          disabled={detailLoading}
+                        >
+                          View Details
+                        </button>
+                        {inv.status === 'CONFIRMED' && inv.remainingBalanceMinor > 0 && (
+                          <button
+                            className="btn-primary"
+                            style={{ padding: '4px 10px', fontSize: '0.78rem' }}
+                            onClick={() => openPaymentModal(inv)}
+                          >
+                            + Pay
+                          </button>
+                        )}
+                      </div>
                     </td>
                   </tr>
                 ))}
@@ -401,9 +531,57 @@ export function BillingPage() {
                 </table>
               </div>
 
+              <div>
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
+                  <h3 style={{ fontSize: '1rem', margin: 0 }}>Recorded Payments</h3>
+                  {selectedInvoice.status === 'CONFIRMED' && selectedInvoice.remainingBalanceMinor > 0 && (
+                    <button
+                      className="btn-primary"
+                      style={{ padding: '4px 12px', fontSize: '0.8rem' }}
+                      onClick={() => openPaymentModal(selectedInvoice)}
+                    >
+                      + Record Payment
+                    </button>
+                  )}
+                </div>
+
+                {selectedInvoice.payments && selectedInvoice.payments.length > 0 ? (
+                  <table className="billing-table">
+                    <thead>
+                      <tr>
+                        <th>Date</th>
+                        <th>Method</th>
+                        <th>Reference</th>
+                        <th>Note</th>
+                        <th>Amount</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {selectedInvoice.payments.map(p => (
+                        <tr key={p.id}>
+                          <td>{new Date(p.paidAt).toLocaleDateString('en-IN', { timeZone: 'Asia/Kolkata' })}</td>
+                          <td><strong>{p.method}</strong></td>
+                          <td>{p.reference || <span className="muted">—</span>}</td>
+                          <td>{p.note || <span className="muted">—</span>}</td>
+                          <td style={{ color: '#03543f', fontWeight: 600 }}>{formatMoney(p.amountMinor)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                ) : (
+                  <p className="muted" style={{ fontSize: '0.85rem' }}>No payments recorded yet against this invoice.</p>
+                )}
+              </div>
+
               <div className="modal-totals">
                 <div>Subtotal: <strong>{formatMoney(selectedInvoice.subtotalMinor)}</strong></div>
-                <div>Discount: <span>{formatMoney(selectedInvoice.discountMinor)}</span></div>
+                {selectedInvoice.discountMinor > 0 ? (
+                  <div style={{ color: '#03543f' }}>
+                    Discount {selectedInvoice.discountRedemptions && selectedInvoice.discountRedemptions.length > 0 ? `(${selectedInvoice.discountRedemptions[0].discount.name})` : ''}: -{formatMoney(selectedInvoice.discountMinor)}
+                  </div>
+                ) : (
+                  <div>Discount: <span>₹0.00</span></div>
+                )}
                 <div>Tax Total: <span>{formatMoney(selectedInvoice.taxMinor)}</span></div>
                 <div className="grand-total">
                   Invoice Total: {formatMoney(selectedInvoice.totalMinor)}
@@ -421,11 +599,168 @@ export function BillingPage() {
               </div>
             </div>
 
-            <div className="modal-footer">
-              <button className="btn-secondary" onClick={() => setSelectedInvoice(null)}>
+            <div className="modal-footer" style={{ justifyContent: 'space-between' }}>
+              <div style={{ display: 'flex', gap: 10 }}>
+                {selectedInvoice.status === 'DRAFT' && (
+                  <button
+                    className="btn-primary"
+                    onClick={() => handleConfirmInvoice(selectedInvoice.id)}
+                    disabled={actionLoading}
+                  >
+                    {actionLoading ? 'Confirming...' : '✓ Confirm Invoice'}
+                  </button>
+                )}
+                {selectedInvoice.status === 'CONFIRMED' && selectedInvoice.remainingBalanceMinor > 0 && (
+                  <button
+                    className="btn-primary"
+                    onClick={() => openPaymentModal(selectedInvoice)}
+                  >
+                    + Record Payment
+                  </button>
+                )}
+                {(selectedInvoice.status === 'DRAFT' || selectedInvoice.status === 'CONFIRMED') && (
+                  <button
+                    className="btn-secondary"
+                    style={{ color: '#b91c1c', borderColor: '#fca5a5' }}
+                    onClick={() => handleCancelInvoice(selectedInvoice.id)}
+                    disabled={actionLoading || (selectedInvoice.payments && selectedInvoice.payments.length > 0)}
+                    title={selectedInvoice.payments && selectedInvoice.payments.length > 0 ? 'Cannot cancel an invoice with payments' : ''}
+                  >
+                    {actionLoading ? 'Cancelling...' : '✕ Cancel Invoice'}
+                  </button>
+                )}
+              </div>
+              <button className="btn-secondary" onClick={() => setSelectedInvoice(null)} disabled={actionLoading}>
                 Close
               </button>
             </div>
+          </div>
+        </div>
+      )}
+
+      {showPaymentModal && selectedInvoice && (
+        <div className="modal-overlay" onClick={() => !recordingPayment && setShowPaymentModal(false)}>
+          <div className="modal-content" style={{ maxWidth: 520 }} onClick={e => e.stopPropagation()}>
+            <form onSubmit={handleRecordPayment}>
+              <div className="modal-header">
+                <h2>Record Payment for {selectedInvoice.number}</h2>
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setShowPaymentModal(false)}
+                  disabled={recordingPayment}
+                >
+                  ✕
+                </button>
+              </div>
+
+              <div className="modal-body">
+                <div style={{ background: '#f7faf8', padding: 14, borderRadius: 8, fontSize: '0.88rem' }}>
+                  <div>Total Invoiced: <strong>{formatMoney(selectedInvoice.totalMinor)}</strong></div>
+                  <div>Already Paid: <span style={{ color: '#03543f' }}>{formatMoney(selectedInvoice.paidAmountMinor)}</span></div>
+                  <div>Remaining Balance: <strong style={{ color: '#92400e' }}>{formatMoney(selectedInvoice.remainingBalanceMinor)}</strong></div>
+                </div>
+
+                <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, marginBottom: 4 }}>
+                      Payment Method *
+                    </label>
+                    <select
+                      className="filter-select"
+                      style={{ width: '100%' }}
+                      value={paymentMethod}
+                      onChange={e => setPaymentMethod(e.target.value)}
+                      required
+                    >
+                      <option value="BANK_TRANSFER">Bank Transfer (NEFT/RTGS/IMPS)</option>
+                      <option value="UPI">UPI</option>
+                      <option value="CREDIT_CARD">Credit Card</option>
+                      <option value="CASH">Cash</option>
+                      <option value="CHEQUE">Cheque</option>
+                    </select>
+                  </div>
+
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, marginBottom: 4 }}>
+                      Payment Amount (₹) *
+                    </label>
+                    <input
+                      type="number"
+                      step="0.01"
+                      min="0.01"
+                      max={(selectedInvoice.remainingBalanceMinor / 100).toFixed(2)}
+                      className="filter-select"
+                      style={{ width: '100%' }}
+                      value={paymentAmountMajor}
+                      onChange={e => setPaymentAmountMajor(e.target.value)}
+                      required
+                    />
+                    <small className="muted">Maximum allowed: {(selectedInvoice.remainingBalanceMinor / 100).toFixed(2)}</small>
+                  </div>
+
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, marginBottom: 4 }}>
+                      Payment Date *
+                    </label>
+                    <input
+                      type="date"
+                      className="filter-select"
+                      style={{ width: '100%' }}
+                      value={paymentDate}
+                      onChange={e => setPaymentDate(e.target.value)}
+                      required
+                    />
+                  </div>
+
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, marginBottom: 4 }}>
+                      Reference / Transaction ID (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      className="filter-select"
+                      style={{ width: '100%' }}
+                      placeholder="e.g. TXN-UPI-984210"
+                      value={paymentReference}
+                      onChange={e => setPaymentReference(e.target.value)}
+                    />
+                  </div>
+
+                  <div>
+                    <label style={{ display: 'block', fontSize: '0.82rem', fontWeight: 600, marginBottom: 4 }}>
+                      Internal Note (Optional)
+                    </label>
+                    <input
+                      type="text"
+                      className="filter-select"
+                      style={{ width: '100%' }}
+                      placeholder="e.g. Cleared in current account"
+                      value={paymentNote}
+                      onChange={e => setPaymentNote(e.target.value)}
+                    />
+                  </div>
+                </div>
+              </div>
+
+              <div className="modal-footer">
+                <button
+                  type="button"
+                  className="btn-secondary"
+                  onClick={() => setShowPaymentModal(false)}
+                  disabled={recordingPayment}
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  className="btn-primary"
+                  disabled={recordingPayment}
+                >
+                  {recordingPayment ? 'Recording...' : 'Confirm Payment'}
+                </button>
+              </div>
+            </form>
           </div>
         </div>
       )}

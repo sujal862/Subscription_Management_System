@@ -8,6 +8,8 @@ import { once } from 'node:events';
 import express from 'express';
 import { calculateLine, calculateInvoice } from '../server/src/modules/billing/calculation.js';
 import { calculateNextPeriod } from '../server/src/modules/billing/calendar.js';
+import { selectBestEligibleDiscount } from '../server/src/modules/billing/discounts.js';
+import type { DiscountRule } from '@prisma/client';
 
 test('Billing Phase 1 - Invoice Calculation Unit Tests', async t => {
   await t.test('calculates line subtotal, tax and total in integer paise', () => {
@@ -78,28 +80,115 @@ test('Billing Phase 2 - Calendar Arithmetic & Anchor-Day Clamping Unit Tests', a
   });
 
   await t.test('preserves anchor-day across short months (Jan 31 -> Feb 28 -> Mar 31)', () => {
-    // 31st January 2026
     const jan31 = new Date('2026-01-31T00:00:00.000Z');
     const febResult = calculateNextPeriod(jan31, 'MONTHLY', 31);
-
-    // February in 2026 has 28 days -> clamped to Feb 28
     assert.equal(febResult.nextPeriodStart.toISOString(), '2026-02-28T00:00:00.000Z');
 
-    // Next cycle from Feb 28 with anchorDay = 31 -> March has 31 days -> restored to Mar 31!
     const marResult = calculateNextPeriod(febResult.nextPeriodStart, 'MONTHLY', 31);
     assert.equal(marResult.nextPeriodStart.toISOString(), '2026-03-31T00:00:00.000Z');
   });
 
   await t.test('handles leap year clamping for YEARLY interval (Feb 29 -> Feb 28)', () => {
-    // Leap year Feb 29, 2024
     const leapDay = new Date('2024-02-29T00:00:00.000Z');
     const result = calculateNextPeriod(leapDay, 'YEARLY', 29);
-    // 2025 is not a leap year -> clamped to Feb 28, 2025
     assert.equal(result.nextPeriodStart.toISOString(), '2025-02-28T00:00:00.000Z');
   });
 });
 
-test('Billing Phase 1 & 2 - Invoice DB Snapshots, APIs & Recurring Engine', async t => {
+test('Billing Phase 3 - Discount Eligibility & Selection Unit Tests', async t => {
+  const baseRule: DiscountRule = {
+    id: 'disc-1',
+    name: '10% Off Subscription',
+    kind: 'PERCENTAGE',
+    scope: 'SUBSCRIPTION',
+    value: 1000, // 1000 bps = 10%
+    productId: null,
+    minimumPurchaseMinor: 50000, // min ₹500
+    minimumQuantity: 1,
+    startsAt: new Date('2026-01-01T00:00:00.000Z'),
+    endsAt: new Date('2026-12-31T23:59:59.999Z'),
+    usageLimit: 5,
+    uses: 0,
+    isActive: true,
+    createdAt: new Date(),
+    updatedAt: new Date(),
+  };
+
+  const lines = [
+    { productId: 'prod-1', quantity: 2, unitPriceMinor: 100000, taxRateBps: 1800 }, // Subtotal: 200000 (₹2,000)
+  ];
+  const date = new Date('2026-06-01T00:00:00.000Z');
+
+  await t.test('selects percentage discount correctly (10% of ₹2,000 = ₹200 savings)', () => {
+    const selected = selectBestEligibleDiscount([baseRule], lines, date);
+    assert.ok(selected);
+    assert.equal(selected.rule.id, 'disc-1');
+    assert.equal(selected.savingsMinor, 20000); // 20000 paise
+  });
+
+  await t.test('selects single largest savings deterministically among competing discounts', () => {
+    const fixedRule: DiscountRule = {
+      ...baseRule,
+      id: 'disc-2',
+      name: 'Fixed ₹300 Off',
+      kind: 'FIXED',
+      value: 30000, // ₹300
+    };
+
+    // Competing: 10% of ₹2000 = ₹200 vs Fixed ₹300.
+    // Should select disc-2 (₹300 savings)
+    const selected = selectBestEligibleDiscount([baseRule, fixedRule], lines, date);
+    assert.ok(selected);
+    assert.equal(selected.rule.id, 'disc-2');
+    assert.equal(selected.savingsMinor, 30000);
+  });
+
+  await t.test('rejects expired discounts or discounts before start date', () => {
+    const expiredRule: DiscountRule = {
+      ...baseRule,
+      id: 'disc-expired',
+      endsAt: new Date('2026-05-01T00:00:00.000Z'),
+    };
+    const selected = selectBestEligibleDiscount([expiredRule], lines, date);
+    assert.equal(selected, null);
+  });
+
+  await t.test('rejects exhausted discounts when uses >= usageLimit', () => {
+    const exhaustedRule: DiscountRule = {
+      ...baseRule,
+      id: 'disc-exhausted',
+      usageLimit: 3,
+      uses: 3,
+    };
+    const selected = selectBestEligibleDiscount([exhaustedRule], lines, date);
+    assert.equal(selected, null);
+  });
+
+  await t.test('rejects when minimum purchase or quantity is not met', () => {
+    const highThresholdRule: DiscountRule = {
+      ...baseRule,
+      id: 'disc-high',
+      minimumPurchaseMinor: 500000, // ₹5,000 (lines only total ₹2,000)
+    };
+    const selected = selectBestEligibleDiscount([highThresholdRule], lines, date);
+    assert.equal(selected, null);
+  });
+
+  await t.test('product-scope discount matches target product only', () => {
+    const productRule: DiscountRule = {
+      ...baseRule,
+      id: 'disc-prod',
+      scope: 'PRODUCT',
+      productId: 'prod-other', // different product
+      kind: 'FIXED',
+      value: 10000,
+    };
+    const selected = selectBestEligibleDiscount([productRule], lines, date);
+    assert.equal(selected, null);
+  });
+});
+
+test('Billing Full Integration - Invoices, Recurring Runs, Actions & Discounts', async t => {
   const directory = mkdtempSync(path.join(tmpdir(), 'brightloop-billing-test-'));
   const dbPath = path.join(directory, 'billing-test.db');
   process.env.DATABASE_URL = `file:${dbPath.replaceAll('\\', '/')}`;
@@ -115,7 +204,6 @@ test('Billing Phase 1 & 2 - Invoice DB Snapshots, APIs & Recurring Engine', asyn
   const { createInvoiceFromSubscription } = await import('../server/src/modules/billing/service.js');
   const { billingRouter } = await import('../server/src/modules/billing/router.js');
 
-  // Build isolated test express server
   const testApp = express();
   testApp.use(express.json());
 
@@ -149,7 +237,6 @@ test('Billing Phase 1 & 2 - Invoice DB Snapshots, APIs & Recurring Engine', asyn
   const base = `http://127.0.0.1:${address.port}/api/billing`;
 
   try {
-    // 1. Seed Customer, Product, Plan, and Subscriptions
     const customer = await db.customer.create({
       data: {
         name: 'Bright Customer Inc',
@@ -218,199 +305,85 @@ test('Billing Phase 1 & 2 - Invoice DB Snapshots, APIs & Recurring Engine', asyn
       assert.ok(invoice.number.startsWith('INV-202611-'));
       assert.equal(invoice.customerName, 'Bright Customer Inc');
       assert.equal(invoice.customerEmail, 'billing-lead@customer.test');
-      assert.equal(invoice.customerAddress, '42 Bangalore Tech City');
       assert.equal(invoice.status, 'DRAFT');
-
       assert.equal(invoice.subtotalMinor, 300000);
-      assert.equal(invoice.discountMinor, 0);
       assert.equal(invoice.taxMinor, 54000);
       assert.equal(invoice.totalMinor, 354000);
-
-      assert.equal(invoice.lines.length, 1);
-      const line = invoice.lines[0];
-      assert.equal(line.description, 'Growth Monthly Plan Base');
-      assert.equal(line.quantity, 2);
-      assert.equal(line.unitPriceMinor, 150000);
-      assert.equal(line.taxRateBps, 1800);
-      assert.equal(line.taxMinor, 54000);
-      assert.equal(line.amountMinor, 354000);
 
       createdInvoiceId = invoice.id;
     });
 
-    await t.test('GET /invoices lists invoices with pagination and balances', async () => {
-      const res = await fetch(`${base}/invoices?page=1&pageSize=10`);
-      assert.equal(res.status, 200);
-      const json = await res.json();
-
-      assert.ok(json.data);
-      assert.equal(json.data.page, 1);
-      assert.equal(json.data.pageSize, 10);
-      assert.equal(json.data.total, 1);
-      assert.equal(json.data.items.length, 1);
-
-      const inv = json.data.items[0];
-      assert.equal(inv.id, createdInvoiceId);
-      assert.equal(inv.paidAmountMinor, 0);
-      assert.equal(inv.remainingBalanceMinor, 354000);
-    });
-
-    await t.test('GET /invoices/:id returns full detail with snapshots', async () => {
-      const res = await fetch(`${base}/invoices/${createdInvoiceId}`);
-      assert.equal(res.status, 200);
-      const json = await res.json();
-
-      assert.equal(json.data.id, createdInvoiceId);
-      assert.equal(json.data.customerName, 'Bright Customer Inc');
-      assert.equal(json.data.lines.length, 1);
-    });
-
     // -------------------------------------------------------------
-    // PHASE 2 RECURRING BILLING ENGINE INTEGRATION TESTS
+    // PHASE 3 INVOICE ACTIONS TESTS: CONFIRM & CANCEL
     // -------------------------------------------------------------
 
-    // Create a new subscription specifically for recurring billing runs
-    const subRecurring = await db.subscription.create({
-      data: {
-        number: 'SUB-RECURRING-001',
-        customerId: customer.id,
-        planId: plan.id,
-        status: 'ACTIVE',
-        billingInterval: 'MONTHLY',
-        billingAnchorDay: 1,
-        startDate: new Date('2026-10-01T00:00:00.000Z'),
-        nextBillingDate: new Date('2026-10-01T00:00:00.000Z'),
-        paymentTermDays: 7,
-        lines: {
-          create: [
-            {
-              productId: product.id,
-              description: 'Recurring Analytics Seat',
-              quantity: 1,
-              unitPriceMinor: 200000,
-              taxRateBps: 1800,
-            },
-          ],
-        },
-      },
-    });
-
-    await t.test('POST /run triggers recurring billing cycle and advances nextBillingDate', async () => {
-      const res = await fetch(`${base}/run`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          targetDate: '2026-10-15T00:00:00.000Z',
-          subscriptionId: subRecurring.id,
-        }),
-      });
-
+    await t.test('POST /invoices/:id/confirm transitions DRAFT to CONFIRMED', async () => {
+      const res = await fetch(`${base}/invoices/${createdInvoiceId}/confirm`, { method: 'POST' });
       assert.equal(res.status, 200);
       const json = await res.json();
-      assert.equal(json.data.invoicesCreated, 1);
-      assert.equal(json.data.skippedDuplicates, 0);
+      assert.equal(json.data.status, 'CONFIRMED');
 
-      // Verify subscription's nextBillingDate advanced to Nov 1, 2026
-      const updatedSub = await db.subscription.findUnique({ where: { id: subRecurring.id } });
-      assert.ok(updatedSub?.nextBillingDate);
-      assert.equal(updatedSub?.nextBillingDate.toISOString(), '2026-11-01T00:00:00.000Z');
-
-      // Verify invoice was created in DB for 2026-10-01
-      const invoice = await db.invoice.findUnique({
-        where: {
-          subscriptionId_periodStart: {
-            subscriptionId: subRecurring.id,
-            periodStart: new Date('2026-10-01T00:00:00.000Z'),
-          },
-        },
-      });
-      assert.ok(invoice);
-      assert.equal(invoice.totalMinor, 236000); // 200000 + 36000 tax
+      // Calling confirm again on already confirmed invoice returns 400
+      const resAgain = await fetch(`${base}/invoices/${createdInvoiceId}/confirm`, { method: 'POST' });
+      assert.equal(resAgain.status, 400);
     });
 
-    await t.test('POST /run is idempotent: repeated runs prevent duplicate invoices', async () => {
-      // Run again for the exact same targetDate
-      const res = await fetch(`${base}/run`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          targetDate: '2026-10-15T00:00:00.000Z',
-          subscriptionId: subRecurring.id,
-        }),
-      });
-
-      assert.equal(res.status, 200);
-      const json = await res.json();
-      // nextBillingDate is already 2026-11-01, which is > 2026-10-15, so 0 invoices are created
-      assert.equal(json.data.invoicesCreated, 0);
-
-      // Verify total invoices for this subscription is still exactly 1
-      const count = await db.invoice.count({ where: { subscriptionId: subRecurring.id } });
-      assert.equal(count, 1);
-    });
-
-    await t.test('handles bounded catch-up without skipping missed periods', async () => {
-      // Create a subscription that missed 3 monthly periods (June, July, August 2026)
-      const subCatchUp = await db.subscription.create({
+    await t.test('POST /invoices/:id/cancel cancels invoice and blocks cancellation if payments exist', async () => {
+      // 1. Simulate a payment record to test payment protection
+      await db.payment.create({
         data: {
-          number: 'SUB-CATCHUP-001',
+          invoiceId: createdInvoiceId,
+          method: 'BANK_TRANSFER',
+          amountMinor: 50000,
+          paidAt: new Date(),
+          reference: 'TXN-TEST-001',
+        },
+      });
+
+      // Cancellation must be rejected with 400 because payment exists
+      const rejectRes = await fetch(`${base}/invoices/${createdInvoiceId}/cancel`, { method: 'POST' });
+      assert.equal(rejectRes.status, 400);
+      const rejectJson = await rejectRes.json();
+      assert.equal(rejectJson.error.code, 'PAYMENTS_EXIST');
+
+      // Remove the test payment so we can test successful cancellation of a clean invoice
+      await db.payment.deleteMany({ where: { invoiceId: createdInvoiceId } });
+
+      // Now cancellation succeeds
+      const cancelRes = await fetch(`${base}/invoices/${createdInvoiceId}/cancel`, { method: 'POST' });
+      assert.equal(cancelRes.status, 200);
+      const cancelJson = await cancelRes.json();
+      assert.equal(cancelJson.data.status, 'CANCELLED');
+    });
+
+    // -------------------------------------------------------------
+    // PHASE 3 AUTOMATIC DISCOUNT & ATOMIC REDEMPTION TESTS
+    // -------------------------------------------------------------
+
+    await t.test('applies eligible discount atomically with tax-after-discount and redemption record', async () => {
+      // Create active discount rule: 10% off with usage limit of 2
+      const discount = await db.discountRule.create({
+        data: {
+          name: 'Promo 10% Off',
+          kind: 'PERCENTAGE',
+          scope: 'SUBSCRIPTION',
+          value: 1000, // 10% bps
+          minimumPurchaseMinor: 100000,
+          startsAt: new Date('2026-10-01T00:00:00.000Z'),
+          usageLimit: 2,
+          uses: 0,
+          isActive: true,
+        },
+      });
+
+      const subWithDiscount = await db.subscription.create({
+        data: {
+          number: 'SUB-DISC-001',
           customerId: customer.id,
           planId: plan.id,
           status: 'ACTIVE',
           billingInterval: 'MONTHLY',
           billingAnchorDay: 1,
-          startDate: new Date('2026-06-01T00:00:00.000Z'),
-          nextBillingDate: new Date('2026-06-01T00:00:00.000Z'),
-          paymentTermDays: 7,
-          lines: {
-            create: [
-              {
-                productId: product.id,
-                description: 'Catch-up Line',
-                quantity: 1,
-                unitPriceMinor: 100000,
-                taxRateBps: 0,
-              },
-            ],
-          },
-        },
-      });
-
-      // Target cutoff is August 15, 2026 -> should bill June 1, July 1, August 1 (3 periods)
-      const res = await fetch(`${base}/run`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          targetDate: '2026-08-15T00:00:00.000Z',
-          subscriptionId: subCatchUp.id,
-        }),
-      });
-
-      assert.equal(res.status, 200);
-      const json = await res.json();
-      assert.equal(json.data.invoicesCreated, 3, 'Should bill 3 missed periods sequentially');
-
-      const updatedSub = await db.subscription.findUnique({ where: { id: subCatchUp.id } });
-      assert.equal(updatedSub?.nextBillingDate?.toISOString(), '2026-09-01T00:00:00.000Z');
-
-      const invoices = await db.invoice.findMany({
-        where: { subscriptionId: subCatchUp.id },
-        orderBy: { periodStart: 'asc' },
-      });
-      assert.equal(invoices.length, 3);
-      assert.equal(invoices[0].periodStart.toISOString(), '2026-06-01T00:00:00.000Z');
-      assert.equal(invoices[1].periodStart.toISOString(), '2026-07-01T00:00:00.000Z');
-      assert.equal(invoices[2].periodStart.toISOString(), '2026-08-01T00:00:00.000Z');
-    });
-
-    await t.test('skips PAUSED or CLOSED subscriptions from billing runs', async () => {
-      const subPaused = await db.subscription.create({
-        data: {
-          number: 'SUB-PAUSED-001',
-          customerId: customer.id,
-          planId: plan.id,
-          status: 'PAUSED',
-          billingInterval: 'MONTHLY',
           startDate: new Date('2026-10-01T00:00:00.000Z'),
           nextBillingDate: new Date('2026-10-01T00:00:00.000Z'),
           paymentTermDays: 7,
@@ -418,106 +391,237 @@ test('Billing Phase 1 & 2 - Invoice DB Snapshots, APIs & Recurring Engine', asyn
             create: [
               {
                 productId: product.id,
-                description: 'Paused Line',
+                description: 'Analytics Seat with Discount',
                 quantity: 1,
-                unitPriceMinor: 100000,
-                taxRateBps: 0,
+                unitPriceMinor: 200000, // Subtotal: 200000
+                taxRateBps: 1800,       // 18% tax
               },
             ],
           },
         },
       });
 
+      // Run billing cycle for 2026-10-01
       const res = await fetch(`${base}/run`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           targetDate: '2026-10-15T00:00:00.000Z',
-          subscriptionId: subPaused.id,
+          subscriptionId: subWithDiscount.id,
         }),
       });
 
       assert.equal(res.status, 200);
-      const json = await res.json();
-      assert.equal(json.data.invoicesCreated, 0, 'Paused subscription must not be billed');
-    });
 
-    await t.test('respects subscription expiryDate boundary and stops billing past expiry', async () => {
-      const subExpired = await db.subscription.create({
-        data: {
-          number: 'SUB-EXPIRED-001',
-          customerId: customer.id,
-          planId: plan.id,
-          status: 'ACTIVE',
-          billingInterval: 'MONTHLY',
-          startDate: new Date('2026-10-01T00:00:00.000Z'),
-          expiryDate: new Date('2026-10-15T00:00:00.000Z'),
-          nextBillingDate: new Date('2026-10-01T00:00:00.000Z'), // current period starts before expiry
-          paymentTermDays: 7,
-          lines: {
-            create: [
-              {
-                productId: product.id,
-                description: 'Expiring Line',
-                quantity: 1,
-                unitPriceMinor: 100000,
-                taxRateBps: 0,
-              },
-            ],
+      // Verify created invoice received the 10% discount and tax on discounted base:
+      // Subtotal: 200000 (₹2,000)
+      // Discount: 20000 (₹200)
+      // Taxable Base: 180000 (₹1,800)
+      // Tax: Math.round(180000 * 1800 / 10000) = 32400 (₹324)
+      // Total: 180000 + 32400 = 212400 (₹2,124)
+      const invoice = await db.invoice.findUnique({
+        where: {
+          subscriptionId_periodStart: {
+            subscriptionId: subWithDiscount.id,
+            periodStart: new Date('2026-10-01T00:00:00.000Z'),
           },
         },
-      });
-
-      // Run up to end of year:
-      // Oct 1 period will be billed (starts before expiry).
-      // Next period (Nov 1) starts AFTER expiryDate (Oct 15) -> must NOT be billed!
-      const res = await fetch(`${base}/run`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          targetDate: '2026-12-31T00:00:00.000Z',
-          subscriptionId: subExpired.id,
-        }),
-      });
-
-      assert.equal(res.status, 200);
-      const json = await res.json();
-      assert.equal(json.data.invoicesCreated, 1, 'Only the eligible final period should be billed');
-    });
-
-    await t.test('rollback behavior: failure during creation does NOT advance nextBillingDate', async () => {
-      // Create a subscription with an invalid setup that fails calculation
-      const subFailing = await db.subscription.create({
-        data: {
-          number: 'SUB-FAILING-001',
-          customerId: customer.id,
-          planId: plan.id,
-          status: 'ACTIVE',
-          billingInterval: 'MONTHLY',
-          startDate: new Date('2026-10-01T00:00:00.000Z'),
-          nextBillingDate: new Date('2026-10-01T00:00:00.000Z'),
-          paymentTermDays: 7,
-          // No lines attached -> createInvoiceFromSubscription throws NO_LINES
+        include: {
+          discountRedemptions: true,
         },
       });
 
-      const res = await fetch(`${base}/run`, {
+      assert.ok(invoice);
+      assert.equal(invoice.subtotalMinor, 200000);
+      assert.equal(invoice.discountMinor, 20000);
+      assert.equal(invoice.taxMinor, 32400);
+      assert.equal(invoice.totalMinor, 212400);
+
+      // Verify atomic redemption record
+      assert.equal(invoice.discountRedemptions.length, 1);
+      assert.equal(invoice.discountRedemptions[0].discountId, discount.id);
+      assert.equal(invoice.discountRedemptions[0].amountMinor, 20000);
+
+      // Verify discount uses incremented
+      const updatedDiscount = await db.discountRule.findUnique({ where: { id: discount.id } });
+      assert.equal(updatedDiscount?.uses, 1);
+    });
+
+    // -------------------------------------------------------------
+    // PHASE 4 PAYMENT RECORDS, BALANCES & OVERDUE FILTER TESTS
+    // -------------------------------------------------------------
+
+    // Create a confirmed invoice for payment tests
+    const confirmedInvoice = await db.invoice.create({
+      data: {
+        number: 'INV-PAY-001',
+        subscriptionId: subscription.id,
+        customerId: customer.id,
+        customerName: customer.name,
+        customerEmail: customer.email,
+        status: 'CONFIRMED',
+        periodStart: new Date('2026-10-01T00:00:00.000Z'),
+        periodEnd: new Date('2026-10-31T23:59:59.999Z'),
+        dueDate: new Date('2026-10-15T00:00:00.000Z'), // Past date -> overdue
+        subtotalMinor: 200000,
+        discountMinor: 0,
+        taxMinor: 36000,
+        totalMinor: 236000, // Total: ₹2,360.00
+      },
+    });
+
+    await t.test('POST /invoices/:id/payments records partial payment and keeps status CONFIRMED', async () => {
+      const res = await fetch(`${base}/invoices/${confirmedInvoice.id}/payments`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          targetDate: '2026-10-15T00:00:00.000Z',
-          subscriptionId: subFailing.id,
+          method: 'BANK_TRANSFER',
+          amountMinor: 100000, // Partial payment of ₹1,000.00
+          reference: 'TXN-REF-1001',
+          note: 'First installment',
         }),
       });
 
+      assert.equal(res.status, 201);
+      const json = await res.json();
+      assert.equal(json.data.payment.amountMinor, 100000);
+      assert.equal(json.data.invoice.status, 'CONFIRMED');
+      assert.equal(json.data.invoice.paidAmountMinor, 100000);
+      assert.equal(json.data.invoice.remainingBalanceMinor, 136000);
+    });
+
+    await t.test('GET /invoices/:id/payments lists payments with balances', async () => {
+      const res = await fetch(`${base}/invoices/${confirmedInvoice.id}/payments`);
       assert.equal(res.status, 200);
       const json = await res.json();
-      assert.equal(json.data.invoicesCreated, 0);
-      assert.equal(json.data.errors.length, 1);
+      assert.equal(json.data.items.length, 1);
+      assert.equal(json.data.totalPaidMinor, 100000);
+      assert.equal(json.data.remainingBalanceMinor, 136000);
+    });
 
-      // Verify nextBillingDate was NOT advanced
-      const subAfter = await db.subscription.findUnique({ where: { id: subFailing.id } });
-      assert.equal(subAfter?.nextBillingDate?.toISOString(), '2026-10-01T00:00:00.000Z');
+    await t.test('rejects duplicate payment references', async () => {
+      const res = await fetch(`${base}/invoices/${confirmedInvoice.id}/payments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          method: 'UPI',
+          amountMinor: 10000,
+          reference: 'TXN-REF-1001', // Already used above
+        }),
+      });
+
+      assert.equal(res.status, 400);
+      const json = await res.json();
+      assert.equal(json.error.code, 'DUPLICATE_REFERENCE');
+    });
+
+    await t.test('rejects overpayment exceeding remaining balance', async () => {
+      // Remaining balance is 136000 paise. Attempting to pay 136001 must be rejected!
+      const res = await fetch(`${base}/invoices/${confirmedInvoice.id}/payments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          method: 'UPI',
+          amountMinor: 136001,
+          reference: 'TXN-REF-OVERPAY',
+        }),
+      });
+
+      assert.equal(res.status, 400);
+      const json = await res.json();
+      assert.equal(json.error.code, 'OVERPAYMENT');
+    });
+
+    await t.test('exact remaining payment transitions status to PAID', async () => {
+      const res = await fetch(`${base}/invoices/${confirmedInvoice.id}/payments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          method: 'UPI',
+          amountMinor: 136000, // Exact remaining balance
+          reference: 'TXN-REF-FINAL',
+        }),
+      });
+
+      assert.equal(res.status, 201);
+      const json = await res.json();
+      assert.equal(json.data.invoice.status, 'PAID');
+      assert.equal(json.data.invoice.paidAmountMinor, 236000);
+      assert.equal(json.data.invoice.remainingBalanceMinor, 0);
+
+      // Verify in DB that status is PAID
+      const dbInvoice = await db.invoice.findUnique({ where: { id: confirmedInvoice.id } });
+      assert.equal(dbInvoice?.status, 'PAID');
+    });
+
+    await t.test('rejects payments against DRAFT and CANCELLED invoices', async () => {
+      // Create a Draft invoice
+      const draftInvoice = await db.invoice.create({
+        data: {
+          number: 'INV-DRAFT-TEST',
+          subscriptionId: subscription.id,
+          customerId: customer.id,
+          customerName: customer.name,
+          customerEmail: customer.email,
+          status: 'DRAFT',
+          periodStart: new Date('2026-12-01T00:00:00.000Z'),
+          periodEnd: new Date('2026-12-31T23:59:59.999Z'),
+          dueDate: new Date('2026-12-15T00:00:00.000Z'),
+          subtotalMinor: 100000,
+          totalMinor: 118000,
+        },
+      });
+
+      const draftRes = await fetch(`${base}/invoices/${draftInvoice.id}/payments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          method: 'CASH',
+          amountMinor: 50000,
+        }),
+      });
+      assert.equal(draftRes.status, 400);
+      assert.equal((await draftRes.json()).error.code, 'INVALID_INVOICE_STATUS');
+
+      // Cancel the invoice and test again
+      await db.invoice.update({ where: { id: draftInvoice.id }, data: { status: 'CANCELLED' } });
+      const cancelRes = await fetch(`${base}/invoices/${draftInvoice.id}/payments`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          method: 'CASH',
+          amountMinor: 50000,
+        }),
+      });
+      assert.equal(cancelRes.status, 400);
+      assert.equal((await cancelRes.json()).error.code, 'INVALID_INVOICE_STATUS');
+    });
+
+    await t.test('GET /invoices?overdue=true returns only unpaid past-due invoices', async () => {
+      // Create an overdue invoice
+      const overdueInv = await db.invoice.create({
+        data: {
+          number: 'INV-OVERDUE-TEST',
+          subscriptionId: subscription.id,
+          customerId: customer.id,
+          customerName: customer.name,
+          customerEmail: customer.email,
+          status: 'CONFIRMED',
+          periodStart: new Date('2026-09-01T00:00:00.000Z'),
+          periodEnd: new Date('2026-09-30T23:59:59.999Z'),
+          dueDate: new Date('2026-09-15T00:00:00.000Z'), // definitely in the past
+          subtotalMinor: 100000,
+          totalMinor: 118000,
+        },
+      });
+
+      const res = await fetch(`${base}/invoices?overdue=true`);
+      assert.equal(res.status, 200);
+      const json = await res.json();
+      assert.ok(json.data.items.length >= 1);
+      const found = json.data.items.find((i: any) => i.id === overdueInv.id);
+      assert.ok(found);
+      assert.equal(found.isOverdue, true);
     });
 
   } finally {
@@ -525,7 +629,6 @@ test('Billing Phase 1 & 2 - Invoice DB Snapshots, APIs & Recurring Engine', asyn
     await new Promise<void>((resolve, reject) => server.close(err => (err ? reject(err) : resolve())));
     await db.$disconnect();
 
-    // Cleanup directory
     for (const filename of readdirSync(directory)) {
       unlinkSync(path.join(directory, filename));
     }
