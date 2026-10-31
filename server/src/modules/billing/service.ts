@@ -1,5 +1,6 @@
 import { db } from '../../lib/db.js';
 import { HttpError } from '../../lib/http.js';
+import { sendMail } from '../../lib/mail.js';
 import { calculateInvoice, type LineCalculationInput } from './calculation.js';
 import { selectBestEligibleDiscount } from './discounts.js';
 import type { Prisma, InvoiceStatus } from '@prisma/client';
@@ -412,7 +413,7 @@ export async function listInvoices(options: ListInvoicesOptions) {
   };
 }
 
-export async function getInvoiceById(id: string) {
+export async function getInvoiceById(id: string, customerId?: string) {
   const invoice = await db.invoice.findUnique({
     where: { id },
     include: {
@@ -434,6 +435,11 @@ export async function getInvoiceById(id: string) {
     throw new HttpError(404, 'NOT_FOUND', 'Invoice not found');
   }
 
+  // Cross-customer security isolation: reject if customerId does not match
+  if (customerId && invoice.customerId !== customerId) {
+    throw new HttpError(404, 'NOT_FOUND', 'Invoice not found');
+  }
+
   const paidAmountMinor = invoice.payments.reduce((acc, p) => acc + p.amountMinor, 0);
   const remainingBalanceMinor = Math.max(0, invoice.totalMinor - paidAmountMinor);
   const isOverdue = invoice.status === 'CONFIRMED' && invoice.dueDate < new Date() && remainingBalanceMinor > 0;
@@ -443,5 +449,139 @@ export async function getInvoiceById(id: string) {
     paidAmountMinor,
     remainingBalanceMinor,
     isOverdue,
+  };
+}
+
+export async function getPrintableInvoice(id: string, customerId?: string) {
+  const invoice = await getInvoiceById(id, customerId);
+  return {
+    invoice,
+    printable: true,
+  };
+}
+
+export async function sendInvoiceEmail(invoiceId: string) {
+  const invoice = await getInvoiceById(invoiceId);
+  const recipient = invoice.customerEmail || invoice.customer?.email;
+  if (!recipient) {
+    throw new HttpError(400, 'NO_RECIPIENT_EMAIL', 'Invoice does not have a customer email');
+  }
+
+  const subject = `Invoice ${invoice.number} from Brightloop`;
+
+  const formattedSubtotal = (invoice.subtotalMinor / 100).toFixed(2);
+  const formattedDiscount = (invoice.discountMinor / 100).toFixed(2);
+  const formattedTax = (invoice.taxMinor / 100).toFixed(2);
+  const formattedTotal = (invoice.totalMinor / 100).toFixed(2);
+  const formattedPaid = (invoice.paidAmountMinor / 100).toFixed(2);
+  const formattedBalance = (invoice.remainingBalanceMinor / 100).toFixed(2);
+  const issuedDate = new Date(invoice.issuedAt).toISOString().split('T')[0];
+  const dueDate = new Date(invoice.dueDate).toISOString().split('T')[0];
+  const periodStart = new Date(invoice.periodStart).toISOString().split('T')[0];
+  const periodEnd = new Date(invoice.periodEnd).toISOString().split('T')[0];
+
+  const lineItemsText = invoice.lines
+    .map(line => `  • ${line.description} (Qty: ${line.quantity}, Unit: ₹${(line.unitPriceMinor / 100).toFixed(2)}) - ₹${(line.amountMinor / 100).toFixed(2)}`)
+    .join('\n');
+
+  const text = [
+    `Brightloop Software - Invoice ${invoice.number}`,
+    `====================================================`,
+    `Customer: ${invoice.customerName}`,
+    `Email: ${recipient}`,
+    invoice.customerAddress ? `Address: ${invoice.customerAddress}` : '',
+    `Billing Period: ${periodStart} to ${periodEnd}`,
+    `Issue Date: ${issuedDate}`,
+    `Due Date: ${dueDate}`,
+    `Status: ${invoice.status}`,
+    ``,
+    `Line Items:`,
+    lineItemsText,
+    ``,
+    `Subtotal: ₹${formattedSubtotal}`,
+    invoice.discountMinor > 0 ? `Discount: -₹${formattedDiscount}` : '',
+    `Tax: ₹${formattedTax}`,
+    `Total: ₹${formattedTotal}`,
+    `Paid: ₹${formattedPaid}`,
+    `Remaining Balance: ₹${formattedBalance}`,
+    ``,
+    `Thank you for subscribing to Brightloop!`,
+  ].filter(Boolean).join('\n');
+
+  const lineItemsHtml = invoice.lines
+    .map(line => `<tr>
+      <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb;">${line.description}</td>
+      <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: center;">${line.quantity}</td>
+      <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: right;">₹${(line.unitPriceMinor / 100).toFixed(2)}</td>
+      <td style="padding: 8px 12px; border-bottom: 1px solid #e5e7eb; text-align: right;">₹${(line.amountMinor / 100).toFixed(2)}</td>
+    </tr>`)
+    .join('');
+
+  const html = `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><title>Invoice ${invoice.number}</title></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; color: #1f2937; line-height: 1.5; padding: 24px; max-width: 650px; margin: 0 auto;">
+  <div style="border-bottom: 2px solid #133c35; padding-bottom: 16px; margin-bottom: 24px; display: flex; justify-content: space-between; align-items: baseline;">
+    <h1 style="color: #133c35; margin: 0; font-size: 24px;">Brightloop Software</h1>
+    <span style="font-size: 14px; color: #6b7280;">Invoice #${invoice.number}</span>
+  </div>
+  <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 16px; margin-bottom: 24px; background: #f9fafb; padding: 16px; border-radius: 8px;">
+    <div>
+      <div style="font-size: 12px; color: #6b7280; text-transform: uppercase;">Billed To</div>
+      <div style="font-weight: 600; font-size: 15px;">${invoice.customerName}</div>
+      <div style="color: #4b5563; font-size: 14px;">${recipient}</div>
+      ${invoice.customerAddress ? `<div style="color: #4b5563; font-size: 14px;">${invoice.customerAddress}</div>` : ''}
+    </div>
+    <div>
+      <div style="font-size: 12px; color: #6b7280; text-transform: uppercase;">Invoice Details</div>
+      <div style="font-size: 14px;"><strong>Issue Date:</strong> ${issuedDate}</div>
+      <div style="font-size: 14px;"><strong>Due Date:</strong> ${dueDate}</div>
+      <div style="font-size: 14px;"><strong>Status:</strong> ${invoice.status}</div>
+    </div>
+  </div>
+  <table style="width: 100%; border-collapse: collapse; margin-bottom: 24px; font-size: 14px;">
+    <thead>
+      <tr style="background: #f3f4f6; text-align: left;">
+        <th style="padding: 8px 12px;">Description</th>
+        <th style="padding: 8px 12px; text-align: center;">Qty</th>
+        <th style="padding: 8px 12px; text-align: right;">Unit Price</th>
+        <th style="padding: 8px 12px; text-align: right;">Amount</th>
+      </tr>
+    </thead>
+    <tbody>${lineItemsHtml}</tbody>
+  </table>
+  <div style="display: flex; justify-content: flex-end; margin-bottom: 24px;">
+    <div style="min-width: 220px; font-size: 14px;">
+      <div style="display: flex; justify-content: space-between; padding: 4px 0;"><span>Subtotal:</span><span>₹${formattedSubtotal}</span></div>
+      ${invoice.discountMinor > 0 ? `<div style="display: flex; justify-content: space-between; padding: 4px 0; color: #047857;"><span>Discount:</span><span>-₹${formattedDiscount}</span></div>` : ''}
+      <div style="display: flex; justify-content: space-between; padding: 4px 0;"><span>Tax:</span><span>₹${formattedTax}</span></div>
+      <div style="display: flex; justify-content: space-between; padding: 8px 0; border-top: 2px solid #133c35; font-weight: 700; font-size: 16px; color: #133c35;"><span>Total:</span><span>₹${formattedTotal}</span></div>
+      <div style="display: flex; justify-content: space-between; padding: 4px 0; color: #059669;"><span>Total Paid:</span><span>₹${formattedPaid}</span></div>
+      <div style="display: flex; justify-content: space-between; padding: 4px 0; font-weight: 600; color: ${invoice.remainingBalanceMinor > 0 ? '#b91c1c' : '#047857'};"><span>Remaining Balance:</span><span>₹${formattedBalance}</span></div>
+    </div>
+  </div>
+  <footer style="border-top: 1px solid #e5e7eb; padding-top: 16px; font-size: 12px; color: #6b7280; text-align: center;">
+    Brightloop Software &bull; Subscription Billing &bull; Thank you for your business.
+  </footer>
+</body>
+</html>`;
+
+  await sendMail({
+    to: recipient,
+    subject,
+    text,
+    html,
+  });
+
+  const now = new Date();
+  await db.invoice.update({
+    where: { id: invoice.id },
+    data: { sentAt: now },
+  });
+
+  return {
+    sent: true,
+    sentAt: now,
+    recipient,
   };
 }

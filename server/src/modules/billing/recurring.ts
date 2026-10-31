@@ -80,6 +80,22 @@ export async function runBillingCycle(options: BillingRunOptions = {}): Promise<
 
       try {
         await db.$transaction(async tx => {
+          // Re-verify that subscription is still ACTIVE inside transaction (avoids worker race)
+          const freshSub = await tx.subscription.findUnique({
+            where: { id: subscription.id },
+            select: { status: true, nextBillingDate: true, expiryDate: true },
+          });
+
+          if (!freshSub || freshSub.status !== 'ACTIVE') {
+            hadError = true;
+            return;
+          }
+
+          if (freshSub.expiryDate && currentBillingDate >= freshSub.expiryDate) {
+            hadError = true;
+            return;
+          }
+
           // Check existing unique billing-period key: @@unique([subscriptionId, periodStart])
           const existingInvoice = await tx.invoice.findUnique({
             where: {
