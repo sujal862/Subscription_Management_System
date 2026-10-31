@@ -1,7 +1,9 @@
 # Shared interface, version 1
 
-Only GET /api/health works initially. All other routes below are planned contracts,
-not completed features. Feature owners implement validation and focused tests.
+Implemented after Member 1 Hour 1: GET /api/health, POST /api/auth/signup,
+POST /api/auth/login, POST /api/auth/logout and GET /api/auth/me, plus session and
+role middleware. Other routes below remain planned contracts, not completed
+features. Feature owners implement validation and focused tests.
 
 ## Conventions
 
