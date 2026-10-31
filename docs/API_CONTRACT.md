@@ -1,0 +1,108 @@
+# Shared interface, version 1
+
+Only GET /api/health works initially. All other routes below are planned contracts,
+not completed features. Feature owners implement validation and focused tests.
+
+## Conventions
+
+- Base /api. Success { data: T }. Failure { error: { code, message, details? } }.
+- List result { data: { items, page, pageSize, total } }. Default pageSize 20, max 100.
+- IDs are Prisma cuid strings. UTC ISO-8601 instants; date-only billing inputs use
+  YYYY-MM-DD normalized to UTC midnight. Display business dates consistently in
+  Asia/Kolkata. Never silently use a developer machine's timezone.
+- Currency INR. All *Minor values are integer paise. Quantities positive integers.
+- Tax rateBps: 1800 = 18%. PERCENTAGE discount value uses basis points too (1000 = 10%).
+  FIXED discount value is paise. Validate percentage <=10000 and amounts >=0.
+- Subscription line unitPriceMinor is the final per-seat price including variant
+  adjustment. Primary line defaults to Plan.priceMinor + variant adjustment;
+  add-on lines default to Product.salesPriceMinor + variant adjustment. Never add
+  the plan fee a second time. Validate submitted overrides according to role.
+- Server calculates line subtotal, eligible discount, then tax on discounted base.
+  Round monetary calculations to paise; cap discounts at eligible subtotal.
+- Do not stack discounts initially: choose the largest eligible savings deterministically.
+  Product-scope discount requires productId; whole-subscription scope does not.
+- Snapshot descriptions/prices/customer details/rates on invoices. Future catalog
+  edits must not rewrite issued invoices. Freeze subscription interval at creation.
+- Real sessions in HttpOnly cookies; requireAuth attaches PublicUser to req.user.
+  ADMIN all; STAFF customer/sales/billing operations and non-sensitive catalog reads;
+  CUSTOMER only own portal resources. Catalog writes, tax/discount rules and staff
+  creation ADMIN only. Never expose cost prices in customer responses.
+- Role checks and ownership filtering on the server, not just navigation visibility.
+  No role field accepted in public signup. Signup must not attach an existing
+  customer record merely by matching an unverified email.
+
+## Member 1
+
+| Method/path | Input/result |
+|---|---|
+| POST /auth/signup | {name,email,password} -> PublicUser; customer identity only |
+| POST /auth/login | {email,password} -> PublicUser and session cookie |
+| POST /auth/logout | Revoke session and clear cookie |
+| GET /auth/me | PublicUser, or 401 |
+| POST /auth/forgot-password | {email}; generic response; email reset link |
+| POST /auth/reset-password | {token,password}; one-time expiring token |
+| GET, POST /staff | ADMIN; list or create STAFF with {name,email,password} |
+| GET /dashboard/summary | DashboardSummary from shared/contracts.ts |
+
+Public auth page routes: /account/login, /account/signup,
+/account/forgot-password, /account/reset-password.
+Password >=9 chars, uppercase, lowercase, special; normalized unique email.
+Use hashed passwords and store token/session hashes, not raw tokens. Reset revokes
+sessions. Local file email is an explicit offline demo mode; SMTP is real delivery.
+Summary: exclude draft/cancelled invoices. Revenue is confirmed/paid pre-tax net
+invoiced amount; collected is payments against those invoices; outstanding is
+sum of remaining balances; overdue is remaining balances past dueDate. Add date
+filters with explicit semantics in step 5 and coordinate optional contract fields.
+
+## Member 2, under /catalog
+
+GET/POST /products; GET/PATCH /products/:id; POST /products/:id/variants;
+PATCH /products/:id/variants/:variantId. Product fields follow schema.prisma.
+GET/POST /plans; GET/PATCH /plans/:id. Plan fields include productId, priceMinor,
+interval, minimumQuantity, availableFrom/Until and four lifecycle flags.
+GET/POST /taxes; PATCH /taxes/:id. GET/POST /discounts; PATCH /discounts/:id.
+Use archive/isActive instead of deleting financially referenced data. Validate
+date order, product/variant relationships and all monetary/quantity constraints.
+
+## Member 3, under /subscriptions
+
+GET/POST /customers; GET/PATCH /customers/:id.
+GET/POST /templates; GET/PATCH /templates/:id.
+GET/POST /; GET/PATCH /:id; POST /:id/transition {action}; POST /:id/renew.
+Register /customers and /templates BEFORE /:id.
+Create input {customerId,planId,startDate,expiryDate?,paymentTermDays,templateId?,lines}.
+Line input {productId,variantId?,quantity,unitPriceMinor,taxRuleId?}.
+Template input {name,planId,validDays,paymentTermDays,lines}.
+Transitions: DRAFT -> QUOTATION -> CONFIRMED -> ACTIVE -> CLOSED.
+ACTIVE <-> PAUSED is an additional state controlled by allowPause. Future-dated
+confirmed subscriptions activate when their start date arrives. Enforce quotation
+validity, plan availability, minimum quantity and lifecycle flags.
+Set nextBillingDate on activation. Preserve billingAnchorDay for calendar dates.
+Paused subscriptions do not bill; resume schedules from resume date without charging
+paused time. Renewal creates a linked-in-description new term with new dates/number;
+do not rewrite old invoices. Coordinate precise expiry boundary with billing owner.
+Portal GET /portal/subscriptions and /:id; POST /:id/transition and /:id/renew,
+allowing only own customerId and plan-permitted customer actions.
+
+## Member 4, under /billing
+
+GET /invoices; GET /invoices/:id; POST /run (ADMIN/STAFF);
+POST /invoices/:id/confirm, /cancel, /send;
+GET /invoices/:id/print; GET/POST /invoices/:id/payments.
+Payment input {method,amountMinor,paidAt,note?,reference?}.
+Invoice status DRAFT -> CONFIRMED -> PAID; cancellation must not orphan payments.
+No payment gateway is required: staff records received payments.
+Use unique (subscriptionId,periodStart), transactions and safe discount redemption
+to prevent double billing. Billing run and scheduler share one engine. Handle missed
+periods on restart with a bounded catch-up batch; do not advance past unbilled periods.
+Monthly/yearly intervals use calendar arithmetic with original anchor-day clamping.
+Check closed/paused/expired eligibility. Partial payments allowed; overpayment,
+payments on draft/cancelled invoices and repeated unique reference rejected.
+Portal GET /portal/invoices and /:id and /:id/print; filter by authenticated customerId.
+
+## Integration hooks
+
+Keep exported router names unchanged. Member 3 exports subscriptionsRouter and
+subscriptionPortalRouter; Member 4 exports billingRouter and billingPortalRouter.
+Portal child routers use / and /:id; app.ts mounts their prefixes already.
+The shared schema contains billing constraints but does NOT implement this behavior.
