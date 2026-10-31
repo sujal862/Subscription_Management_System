@@ -1,18 +1,38 @@
-# Brightloop - Subscription Management System
+# Brightloop
 
-Built by a four-person hackathon team, Brightloop provides session authentication,
-protected navigation, staff management, password recovery and a database-backed
-business dashboard. The application includes products/variants/plans,
-customers, templates, subscription lifecycle, taxes, recurring invoices and payments.
-All four modules are integrated, including discount management, invoice send/print,
-both customer portals and scheduled billing. Final review fixes cover billing
-concurrency, exact discount allocation, portal response privacy and mobile layout.
-See [final verification](docs/FINAL_REVIEW.md) for results, configuration and limits.
+### Subscription Management System
 
-## Start locally
+Brightloop brings customer subscriptions, recurring billing and payment tracking into one workspace. Businesses can manage their catalog, prepare quotations, follow subscription lifecycles and track outstanding balances. Customers have a separate portal for their subscriptions and invoices.
 
-Prerequisite: Node.js 20.11+ (22 LTS recommended), npm and Git.
-The dependencies are pinned for compatibility with the existing Node 20.11 machine.
+Built for the Odoo hackathon by **Sujal Raj, Anuj Pal, Prince Seth and Vansh Tyagi**.
+
+## Features
+
+- **Catalog:** Products, variants, recurring plans, tax rules and discounts.
+- **Customers and quotations:** Customer records, reusable quotation templates and subscription drafts.
+- **Subscription lifecycle:** Quotation, confirmation, activation, pause, renewal and closure, subject to plan permissions.
+- **Billing:** Scheduled recurring invoices, discounts before tax, partial payments and payment history.
+- **Dashboard:** Active subscriptions, invoiced revenue, collections, outstanding balances and overdue invoices, with date filters.
+- **Customer portal:** Access to a customer's own subscriptions, invoices and permitted subscription actions.
+- **Account management:** Cookie-based sessions, admin/staff/customer permissions, staff creation and password recovery.
+- **Invoice delivery:** SMTP email or a local file outbox, plus a printable invoice view.
+
+## Technology
+
+| Layer | Stack |
+|---|---|
+| Frontend | React, TypeScript, Vite, React Router |
+| Backend | Node.js, Express, TypeScript |
+| Database | SQLite with Prisma |
+| Validation | Zod |
+| Email | Nodemailer |
+| Testing | Node.js test runner, Testing Library, jsdom; optional Playwright browser checks |
+
+Business data is stored in the database and served through the API. Core workflows run locally after dependencies are installed; SMTP email requires an internet connection.
+
+## Getting started
+
+Install **Node.js 20.11 or later**, npm and Git, then run:
 
 ```sh
 git clone https://github.com/sujal862/Subscription_Management_System.git
@@ -22,137 +42,68 @@ npm run setup
 npm run dev
 ```
 
-Open http://localhost:5173; anonymous visitors are sent to /account/login.
-Use /account/signup to create a customer account and enter the customer portal.
-Existing ADMIN/STAFF accounts enter the internal workspace. There is no public
-role selector or seeded admin account. API health: http://localhost:4000/api/health.
+Open **http://localhost:5173**. The API runs at `http://localhost:4000`, with a health endpoint at `/api/health`.
 
-To create your first administrator, set ADMIN_NAME, ADMIN_EMAIL and ADMIN_PASSWORD
-in your private .env, then run `npm run admin:create`. This explicit command creates
-a new admin only; it never promotes or overwrites an existing account. Do not commit
-credentials. Once signed in, use Team access to create staff accounts.
+Setup creates `.env` from `.env.example` if needed, generates Prisma Client and applies database migrations. It preserves existing data. The local database, environment file and email outbox are excluded from Git.
 
-Password recovery is at /account/forgot-password. By default, emails are delivered
-to private .local/outbox/*.eml files for the offline demo. Open the latest email
-file and copy its complete reset link into the browser. This does not deliver to a
-real inbox. For real SMTP configuration, see [email setup](docs/EMAIL_SETUP.md).
+### Create an administrator
 
-`setup` copies .env.example only if .env is missing, generates Prisma Client,
-applies committed migrations and runs the empty seed hook. It does not reset data.
-SQLite is local at prisma/dev.db and is ignored by Git.
-No Docker, cloud database, email credentials or paid services are needed for setup.
+Set these values in your private `.env`:
 
-## Team start
-
-Read [team workflow](docs/TEAM.md), [API contract](docs/API_CONTRACT.md),
-and [requirements](docs/REQUIREMENTS.md).
-
-| Member | Module | Working branch |
-|---|---|---|
-| 1 - leader | Auth, permissions, staff, dashboard | foundation |
-| 2 | Products, plans, taxes, discounts | work/catalog |
-| 3 | Customers, quotations, subscriptions | work/subscriptions |
-| 4 | Recurring invoices, payments | work/billing |
-
-Create YOUR branch after cloning (example for Member 2):
-
-```sh
-git switch -c work/catalog
-git push -u origin work/catalog
+```dotenv
+ADMIN_NAME=Your name
+ADMIN_EMAIL=your-email@example.com
+ADMIN_PASSWORD=your-private-password
 ```
 
-Do not create four repositories or an organization. Each member makes their own
-branch from main; the leader does not submit everyone's commits under one identity.
-Temporary branches do not replace the organizer's requirement to keep main current:
-integrate working increments every 40-45 minutes. If organizers prohibit temporary
-branches entirely, use the serialized main workflow in TEAM.md instead.
+Use a password longer than eight characters with uppercase, lowercase and a special character. Then run:
 
-## Commands
+```sh
+npm run admin:create
+```
+
+Sign in and open **Team access** to create staff accounts. Public signup creates customer accounts only. No accounts or shared passwords are included in the repository.
+
+### Email configuration
+
+The default `MAIL_MODE=file` saves emails under `.local/outbox` for an offline demonstration. For real email delivery, configure `MAIL_MODE=smtp` and your provider's SMTP settings in `.env`. Restart the API after changing environment settings.
+
+Password reset links expire after 30 minutes, work once and invalidate existing sessions after a successful reset. Set `APP_URL` to the address where users open the application.
+
+See [email setup](docs/EMAIL_SETUP.md) for SMTP, TLS and outbox instructions.
+
+## Demo walkthrough
+
+1. Sign in as an administrator and create a product, variant, recurring plan and tax rule in **Catalog & plans**. Add a discount if required.
+2. In **Subscriptions**, create a customer and a quotation template with product lines, quantities and taxes.
+3. Create a quotation for that customer, confirm it and activate the subscription. Use a start date on or before today to demonstrate billing immediately.
+4. Open **Invoices & payments** and run billing. Running it again for the same period does not create a duplicate invoice.
+5. Confirm the draft invoice and record a partial payment. Check the outstanding and overdue balances on **Overview**.
+6. Record the remaining payment. The invoice becomes paid and the dashboard reflects the collection.
+7. View or print the invoice, send it through the configured email channel and check the linked customer's portal.
+
+The scheduler runs at startup and every minute to process due activations, billing periods and eligible closures. Customer portal access requires a linked customer account; the API enforces record ownership.
+
+## Development commands
 
 | Command | Purpose |
 |---|---|
-| npm run setup | Prepare local environment/database without destructive resets |
-| npm run dev | Start React and API together; Ctrl+C stops both |
-| npm run check | Typecheck, backend/DOM integration tests and production build |
-| npm run db:studio | Inspect your local database |
-| npm run db:migrate -- --name descriptive_change | Leader creates a coordinated schema migration |
-| npm run db:deploy | Apply teammates' committed migrations after pulling |
-| npm run db:seed | Empty hook until team agrees on fixtures |
-| npm run build | Build frontend and backend |
-| npm start | Serve built app/API at http://localhost:4000 |
+| `npm run dev` | Start the frontend and API |
+| `npm run setup` | Prepare the environment and apply migrations |
+| `npm run check` | Run type checks, tests and the production build |
+| `npm test` | Run backend and UI integration tests |
+| `npm run build` | Build the application |
+| `npm start` | Serve the built application on port 4000 |
+| `npm run db:studio` | Browse the local database |
+| `npm run db:deploy` | Apply committed database migrations |
 
-Run from the repository root. Keep API port 4000 and Vite port 5173 during
-development; change the Vite proxy too if coordinating a different API port.
-After a pull with dependency/schema changes: npm ci, then npm run setup.
-The tests use a temporary SQLite database, not your local development data.
+Run commands from the repository root. After pulling dependency or schema changes, run `npm ci` and `npm run setup`.
 
-## Layout
+## Verification
 
-```text
-client/src/features/    independent member UI folders
-client/src/components/ shared scaffold layout
-server/src/modules/    independent member API routers
-server/src/middleware/ session, role and request-origin checks
-server/src/lib/        DB, HTTP and configuration helpers
-shared/                response shapes, statuses and money formatting
-prisma/                agreed starting schema and migration history
-docs/                  setup, API contracts, requirements and verification
-tests/                 backend and DOM integration tests with isolated databases
-```
+The latest local verification passed **238 tests**, TypeScript checks and the production build. Tests use isolated temporary databases. A separate Edge browser check covers the billing journey, permissions, subscription detail buttons and desktop/mobile layouts.
 
-Zod, cookie-parser, rate limits and Nodemailer support validation, real cookie
-sessions and email delivery. Local application data persists in SQLite. After npm
-ci has completed, normal offline use needs no cloud APIs; dependency installation
-and GitHub synchronization require network access. External SMTP delivery and a
-hosted production deployment require separate configuration and verification.
-
-## Member 1 Hour 1 handoff
-
-See [identity and session integration notes](docs/HOUR_1_HANDOFF.md) for working
-API routes, cookie behavior, teammate middleware hooks and remaining scope.
-No demo users are seeded yet. Public signup only creates CUSTOMER accounts.
-
-## Member 1 Hour 2 handoff
-
-See [UI and navigation integration notes](docs/HOUR_2_HANDOFF.md). Sessions restore
-from the HttpOnly cookie after refresh; customers see only their portal links.
-Run npm ci after pulling to install the pinned DOM-testing development dependencies.
-
-## Member 1 Hours 3-4 handoff
-
-See [staff and password recovery notes](docs/HOUR_3_4_HANDOFF.md). No schema migration
-or new package is needed for these steps. New configuration keys are optional
-administrator bootstrap fields, MAIL_OUTBOX_DIR and SMTP_REQUIRE_TLS.
-
-## Dashboard and submission
-
-After pulling these changes run `npm run setup` to apply the dashboard index
-migration. `/` shows active subscriptions, pre-tax invoiced revenue, collected,
-outstanding and overdue balances. Date filters select invoice issue days in
-Asia/Kolkata. Payments/balances are current for those invoices; active subscriptions
-always counts all current ACTIVE records. Draft/cancelled invoices never contribute.
-The overdue list is paginated on the server. Definitions are in the API contract.
-
-There are **no shipped demo credentials**. Configure your own private ADMIN_EMAIL
-and ADMIN_PASSWORD, run `npm run admin:create`, sign in, and create staff via Team
-access. Use public signup for a new customer identity; matching an existing customer
-email does not claim that record. This intentionally avoids a shared known password.
-
-For a current demo: admin creates product/variant/plan in Catalog; create a customer,
-quotation template and quotation in Subscriptions; add a configured tax rule to a line;
-confirm then activate with a start date on/before today; run Billing for today and
-repeat to demonstrate no duplicate. Confirm the generated draft invoice, record a
-partial payment, check the Dashboard and then record the remaining balance. The
-invoice becomes PAID and the Dashboard reflects the collection. The real HTTP
-integration test covers this flow. Account creation, persistence, permissions,
-staff management and recovery can also be demonstrated. Never directly edit the
-demo DB to bypass workflow steps. Discounts can be configured in Catalog and are
-applied before tax on billing. The invoice can be emailed through SMTP or the
-private file outbox, printed from its detail view, and read from its customer's
-portal. The scheduler activates due terms, bills due periods and closes expired
-terms after catch-up; it runs at startup and every minute.
-
-Optional browser verification (requires an installed Microsoft Edge):
+To run the optional browser check with Microsoft Edge installed:
 
 ```sh
 npm install --prefix .local/browser-tools --no-save --package-lock=false playwright@1.56.1
@@ -160,14 +111,35 @@ npm run build
 node --import tsx scripts/browser-smoke.mjs
 ```
 
-This keeps browser tooling outside the pinned application dependencies. The check
-uses an isolated temporary database and random in-memory credentials. Screenshots,
-print PDF and timing results are ignored under .local/final-verification. It does
-not use your development data or send messages to a real email provider.
+See [verification notes](docs/FINAL_REVIEW.md) for coverage and local measurements.
 
-Production-style local serving: `npm run build`, then set APP_URL to
-`http://localhost:4000` in private .env and run `npm start`; use localhost consistently.
-For internet deployment use HTTPS, the matching APP_URL/ALLOWED_ORIGINS and SMTP.
-Reset URLs require HTTPS in production; the default HTTP offline reset demo runs
-using `npm run dev`. Production Secure cookies require a suitable browser/HTTPS
-environment; no hosted deployment is included or verified.
+## Project structure
+
+```text
+client/src/features/    Catalog, subscriptions, billing, auth and dashboard UI
+client/src/components/  Shared layout and navigation
+server/src/modules/     Business APIs
+server/src/middleware/  Authentication, permissions and request checks
+server/src/lib/         Database, email and configuration helpers
+shared/                API contracts, validation and money utilities
+prisma/                Database schema and migrations
+tests/                 API and UI integration tests
+docs/                  Setup, contracts, requirements and verification
+```
+
+## Team
+
+| Team member | Responsibility |
+|---|---|
+| **Sujal Raj** - Team Lead | Authentication, access control, staff management, dashboard and integration |
+| **Anuj Pal** | Products, variants, recurring plans, taxes and discounts |
+| **Prince Seth** | Customers, quotations and subscription lifecycle |
+| **Vansh Tyagi** | Recurring billing, invoices, payments and customer invoice portal |
+
+Development uses one shared repository with module branches and integration into `main`. See the [team workflow](docs/TEAM.md) and [API contract](docs/API_CONTRACT.md).
+
+## Current scope
+
+Brightloop is a local hackathon application backed by SQLite. Payments are recorded manually; no payment gateway is connected. Email uses the configured SMTP service or file outbox, with no durable retry queue. Hosted deployment and real inbox receipt have not been verified.
+
+For deployment, configure HTTPS, `APP_URL`, `ALLOWED_ORIGINS` and SMTP for the target environment. Keep credentials and local data outside version control.
