@@ -161,7 +161,7 @@ test('Hour 1 identity, session and access boundaries', async t => {
       await db.user.create({ data: { name: role, email, role, passwordHash: await hashPassword(password) } });
       const login = await post('/auth/login', { email, password });
       const roleCookie = cookieFrom(login);
-      assert.equal((await get('/staff', roleCookie)).status, role === 'ADMIN' ? 501 : 403);
+      assert.equal((await get('/staff', roleCookie)).status, role === 'ADMIN' ? 200 : 403);
       assert.equal((await get('/catalog/products', roleCookie)).status, 200);
       assert.equal((await get('/billing/invoices', roleCookie)).status, 200);
       assert.equal((await get('/portal/invoices', roleCookie)).status, 403);

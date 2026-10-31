@@ -12,6 +12,7 @@ interface AuthState extends SessionState {
   refreshSession: () => Promise<void>;
   acceptUser: (user: PublicUser) => void;
   logout: () => Promise<void>;
+  clearUser: () => void;
 }
 const AuthContext = createContext<AuthState | null>(null);
 
@@ -52,8 +53,13 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     version.current++;
     setSession({ status: 'anonymous', user: null, error: '', notice: '' });
   }, []);
+  // Use only after a backend action (such as password reset) clears the cookie.
+  const clearUser = useCallback(() => {
+    version.current++;
+    setSession({ status: 'anonymous', user: null, error: '', notice: '' });
+  }, []);
 
-  const value = useMemo(() => ({ ...session, refreshSession, acceptUser, logout }), [session, refreshSession, acceptUser, logout]);
+  const value = useMemo(() => ({ ...session, refreshSession, acceptUser, logout, clearUser }), [session, refreshSession, acceptUser, logout, clearUser]);
   return <AuthContext.Provider value={value}>{children}</AuthContext.Provider>;
 }
 

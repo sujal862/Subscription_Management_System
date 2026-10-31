@@ -2,8 +2,9 @@
 
 Implemented after Member 1 Hour 1: GET /api/health, POST /api/auth/signup,
 POST /api/auth/login, POST /api/auth/logout and GET /api/auth/me, plus session and
-role middleware. Other routes below remain planned contracts, not completed
-features. Feature owners implement validation and focused tests.
+role middleware. Member 1 Hours 3-4 also implement admin GET/POST /api/staff and
+POST /api/auth/forgot-password and /api/auth/reset-password. Other module routes
+follow their owners' progress; route listings alone do not indicate completion.
 
 ## Conventions
 
@@ -43,7 +44,8 @@ features. Feature owners implement validation and focused tests.
 | GET /auth/me | PublicUser, or 401 |
 | POST /auth/forgot-password | {email}; generic response; email reset link |
 | POST /auth/reset-password | {token,password}; one-time expiring token |
-| GET, POST /staff | ADMIN; list or create STAFF with {name,email,password} |
+| GET /staff | ADMIN; Page<PublicUser>, query page/pageSize/search |
+| POST /staff | ADMIN; {name,email,password} -> 201 PublicUser, role fixed to STAFF |
 | GET /dashboard/summary | DashboardSummary from shared/contracts.ts |
 
 Public auth page routes: /account/login, /account/signup,
@@ -51,6 +53,18 @@ Public auth page routes: /account/login, /account/signup,
 Password >=9 chars, uppercase, lowercase, special; normalized unique email.
 Use hashed passwords and store token/session hashes, not raw tokens. Reset revokes
 sessions. Local file email is an explicit offline demo mode; SMTP is real delivery.
+Forgot-password always returns a generic 200 after valid input, including when mail
+delivery fails; operations logs contain a fixed diagnostic without email content.
+Reset token is 64 lowercase hex characters, valid for 30 minutes, consumed once.
+Reset request input is {token,password}; token is carried in the email URL fragment,
+not a query parameter. Success clears the browser cookie and all target sessions.
+Recovery IP limits: 20 forgot and 30 reset attempts per 15 minutes; email resend
+cooldown is 60 seconds per account. Later resends invalidate the previous link.
+Portal owners must derive scope using customerIdFor(req) from middleware/auth.ts
+and constrain every resource query by that ID. The portal gate rejects unlinked
+customer identities even if the role is CUSTOMER. No new portal resources are
+implemented by these hours. Shared sendMail({to,subject,text,html?}) in lib/mail.ts
+is available for Member 4; do not build a second mail transport or expose outbox files.
 Summary: exclude draft/cancelled invoices. Revenue is confirmed/paid pre-tax net
 invoiced amount; collected is payments against those invoices; outstanding is
 sum of remaining balances; overdue is remaining balances past dueDate. Add date

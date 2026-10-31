@@ -1,4 +1,4 @@
-import type { RequestHandler } from 'express';
+import type { Request, RequestHandler } from 'express';
 import type { Role } from '../../../shared/contracts.js';
 import { db } from '../lib/db.js';
 import { config } from '../lib/config.js';
@@ -23,4 +23,15 @@ export const requireRole = (...allowed: Role[]): RequestHandler => (req, _res, n
   if (!req.user) return next(new HttpError(401, 'UNAUTHENTICATED', 'Please sign in'));
   if (!allowed.includes(req.user.role)) return next(new HttpError(403, 'FORBIDDEN', 'You do not have access to this action'));
   next();
+};
+
+// Portal owners use this value in EVERY resource query; client ownership fields
+// must never decide the customer scope. Pending portal features still return 501.
+export function customerIdFor(req: Request): string {
+  if (!req.user) throw new HttpError(401, 'UNAUTHENTICATED', 'Please sign in');
+  if (req.user.role !== 'CUSTOMER' || !req.user.customerId) throw new HttpError(403, 'FORBIDDEN', 'A linked customer account is required');
+  return req.user.customerId;
+}
+export const requireCustomerAccount: RequestHandler = (req, _res, next) => {
+  try { customerIdFor(req); next(); } catch (error) { next(error); }
 };

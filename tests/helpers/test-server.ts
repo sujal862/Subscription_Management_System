@@ -19,16 +19,29 @@ export async function testServer(t: TestContext) {
       server.closeAllConnections();
       await new Promise<void>((resolve, reject) => server!.close(error => error ? reject(error) : resolve()));
     }
-    await database?.$disconnect();
+    if (database) {
+      const { waitForPasswordResetDeliveries } = await import('../../server/src/modules/auth/password-reset.js');
+      await waitForPasswordResetDeliveries();
+      await database.$disconnect();
+    }
     // Nonrecursive cleanup only inside the verified temporary test directory.
     assert.ok(path.resolve(directory).startsWith(path.resolve(tmpdir()) + path.sep));
-    for (const filename of readdirSync(directory)) unlinkSync(path.join(directory, filename));
+    for (const entry of readdirSync(directory, { withFileTypes: true })) {
+      const target = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        assert.equal(entry.name, 'outbox');
+        for (const filename of readdirSync(target)) unlinkSync(path.join(target, filename));
+        rmdirSync(target);
+      } else unlinkSync(target);
+    }
     rmdirSync(directory);
   });
   const filename = path.join(directory, 'test.db');
   writeFileSync(filename, '');
   process.env.DATABASE_URL = `file:${filename.replaceAll('\\', '/')}`;
   process.env.NODE_ENV = 'test';
+  process.env.MAIL_MODE = 'file';
+  process.env.MAIL_OUTBOX_DIR = path.join(directory, 'outbox');
   execFileSync(process.execPath, ['node_modules/prisma/build/index.js', 'migrate', 'deploy'], { env: process.env, stdio: 'pipe' });
   const { app } = await import('../../server/src/app.js');
   const { db } = await import('../../server/src/lib/db.js');

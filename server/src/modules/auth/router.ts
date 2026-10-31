@@ -1,14 +1,14 @@
 import { Router } from 'express';
 import { Prisma } from '@prisma/client';
 import rateLimit from 'express-rate-limit';
-import { signupSchema, loginSchema } from '../../../../shared/auth.js';
+import { signupSchema, loginSchema, forgotPasswordSchema, resetPasswordSchema } from '../../../../shared/auth.js';
 import { db } from '../../lib/db.js';
 import { config } from '../../lib/config.js';
 import { asyncRoute, HttpError } from '../../lib/http.js';
 import { hashPassword, verifyPassword, verifyUnknownPassword } from '../../lib/password.js';
 import { requireAuth } from '../../middleware/auth.js';
 import { newSession, publicUser, readSessionToken, hashSessionToken, setSessionCookie, clearSessionCookie } from './session.js';
-import { pendingRouter } from '../../lib/pending-router.js';
+import { requestPasswordReset, resetPassword, RESET_REQUEST_MESSAGE } from './password-reset.js';
 
 export const authRouter = Router();
 const attemptLimit = () => rateLimit({
@@ -64,6 +64,19 @@ authRouter.post('/logout', asyncRoute(async (req, res) => {
   res.json({ data: { message: 'Signed out' } });
 }));
 
-// Password-reset behavior remains assigned to Hour 4.
-authRouter.post('/forgot-password', pendingRouter('Password reset'));
-authRouter.post('/reset-password', pendingRouter('Password reset'));
+const resetLimit = (limit: number) => rateLimit({
+  windowMs: 15 * 60 * 1000, limit, standardHeaders: 'draft-7', legacyHeaders: false,
+  message: { error: { code: 'RATE_LIMIT', message: 'Too many recovery attempts. Please try again later.' } },
+});
+authRouter.post('/forgot-password', resetLimit(20), asyncRoute(async (req, res) => {
+  const { email } = forgotPasswordSchema.parse(req.body);
+  try { await requestPasswordReset(email); }
+  catch { console.error('Password reset request failed. Check database and mail configuration.'); }
+  res.json({ data: { message: RESET_REQUEST_MESSAGE } });
+}));
+authRouter.post('/reset-password', resetLimit(30), asyncRoute(async (req, res) => {
+  const { token, password } = resetPasswordSchema.parse(req.body);
+  await resetPassword(token, password);
+  clearSessionCookie(res);
+  res.json({ data: { message: 'Password updated. Please sign in with your new password.' } });
+}));

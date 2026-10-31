@@ -68,6 +68,7 @@ export function AuthPage({ mode }: { mode: 'login' | 'signup' }) {
           {submitting && <span className="auth-sr-only" role="status">{signup ? 'Creating your account' : 'Signing in'}</span>}
         </fieldset>
       </form>
+      {!signup && <p className="auth-forgot"><Link to="/account/forgot-password">Forgot password?</Link></p>}
       <p className="auth-switch">{signup ? 'Already have an account?' : 'New to Brightloop?'} <Link to={signup ? '/account/login' : '/account/signup'} state={location.state}>{signup ? 'Sign in' : 'Create an account'}</Link></p>
     </section></main>
   </div>;

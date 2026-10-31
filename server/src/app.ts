@@ -7,7 +7,7 @@ import { ZodError } from 'zod';
 import { config } from './lib/config.js';
 import { db } from './lib/db.js';
 import { HttpError, asyncRoute } from './lib/http.js';
-import { requireAuth, requireRole } from './middleware/auth.js';
+import { requireAuth, requireRole, requireCustomerAccount } from './middleware/auth.js';
 import { requireSafeOrigin } from './middleware/origin.js';
 import { authRouter } from './modules/auth/router.js';
 import { staffRouter } from './modules/staff/router.js';
@@ -35,7 +35,7 @@ app.use('/api/dashboard', requireAuth, requireRole('ADMIN', 'STAFF'), dashboardR
 app.use('/api/catalog', requireAuth, requireRole('ADMIN', 'STAFF'), catalogRouter);
 app.use('/api/subscriptions', requireAuth, requireRole('ADMIN', 'STAFF'), subscriptionsRouter);
 app.use('/api/billing', requireAuth, requireRole('ADMIN', 'STAFF'), billingRouter);
-app.use('/api/portal', requireAuth, requireRole('CUSTOMER'), portalRouter);
+app.use('/api/portal', requireAuth, requireCustomerAccount, portalRouter);
 app.use('/api', (_req, _res, next) => next(new HttpError(404, 'NOT_FOUND', 'API route not found')));
 const clientDirectory = path.resolve('dist/client');
 if (config.production && existsSync(clientDirectory)) {

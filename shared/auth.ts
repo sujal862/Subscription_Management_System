@@ -21,3 +21,9 @@ export const loginSchema = z.object({
   // Do not trim or change a password when verifying it.
   password: z.string().min(1, 'Enter your password').max(128),
 }).strict();
+
+export const forgotPasswordSchema = z.object({ email: emailSchema }).strict();
+export const resetPasswordSchema = z.object({
+  token: z.string().regex(/^[a-f0-9]{64}$/, 'Reset link is invalid or expired'),
+  password: passwordSchema,
+}).strict();

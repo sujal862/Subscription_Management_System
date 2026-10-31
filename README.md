@@ -1,10 +1,9 @@
 # Brightloop - Subscription Management System
 
-One repository for a four-person hackathon team. **Member 1 Hours 1-2 provide backend
-session authentication, login/signup UI, protected routes and role-aware navigation.**
+One repository for a four-person hackathon team. **Member 1 Hours 1-4 provide session
+authentication, protected navigation, admin staff management and email password recovery.**
 Member 3's customer/subscription drafts and Member 4's initial invoice work are
-integrated from main. Password reset,
-staff management and business reporting remain future work. Unfinished APIs return HTTP 501
+integrated from main. Business reporting remains future work. Unfinished APIs return HTTP 501
 after authentication/authorization (401/403 if access is denied).
 
 ## Start locally
@@ -24,6 +23,16 @@ Open http://localhost:5173; anonymous visitors are sent to /account/login.
 Use /account/signup to create a customer account and enter the customer portal.
 Existing ADMIN/STAFF accounts enter the internal workspace. There is no public
 role selector or seeded admin account. API health: http://localhost:4000/api/health.
+
+To create your first administrator, set ADMIN_NAME, ADMIN_EMAIL and ADMIN_PASSWORD
+in your private .env, then run `npm run admin:create`. This explicit command creates
+a new admin only; it never promotes or overwrites an existing account. Do not commit
+credentials. Once signed in, use Team access to create staff accounts.
+
+Password recovery is at /account/forgot-password. By default, emails are delivered
+to private .local/outbox/*.eml files for the offline demo. Open the latest email
+file and copy its complete reset link into the browser. This does not deliver to a
+real inbox. For real SMTP configuration, see [email setup](docs/EMAIL_SETUP.md).
 
 `setup` copies .env.example only if .env is missing, generates Prisma Client,
 applies committed migrations and runs the empty seed hook. It does not reset data.
@@ -90,7 +99,7 @@ tests/                 backend and DOM integration tests with isolated databases
 
 Included libraries for later steps: Zod, cookie-parser, express-rate-limit and
 Nodemailer. Zod, cookie-parser and rate limits are used by the Hour 1 backend;
-email integration remains for Hour 4.
+Nodemailer now supports SMTP and the explicit offline outbox.
 The product must eventually persist business data, authorize every request, support
 the customer portal and pass the final acceptance checklist. This starter alone
 does not satisfy the hackathon problem statement.
@@ -106,3 +115,9 @@ No demo users are seeded yet. Public signup only creates CUSTOMER accounts.
 See [UI and navigation integration notes](docs/HOUR_2_HANDOFF.md). Sessions restore
 from the HttpOnly cookie after refresh; customers see only their portal links.
 Run npm ci after pulling to install the pinned DOM-testing development dependencies.
+
+## Member 1 Hours 3-4 handoff
+
+See [staff and password recovery notes](docs/HOUR_3_4_HANDOFF.md). No schema migration
+or new package is needed for these steps. New configuration keys are optional
+administrator bootstrap fields, MAIL_OUTBOX_DIR and SMTP_REQUIRE_TLS.

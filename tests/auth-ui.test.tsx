@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import { register } from 'node:module';
 import { JSDOM } from 'jsdom';
 import { testServer } from './helpers/test-server.js';
+import { outboxMessages, resetLink } from './helpers/outbox.js';
 
 test('authentication UI integrates with the real session API', async t => {
   const { db, base } = await testServer(t);
@@ -53,7 +54,7 @@ test('authentication UI integrates with the real session API', async t => {
     }
   });
   const password = 'HourTwo!2026';
-  const Location = () => <span data-testid="route">{useLocation().pathname}{useLocation().search}</span>;
+  const Location = () => { const location = useLocation(); return <span data-testid="route" data-has-fragment={!!location.hash}>{location.pathname}{location.search}</span>; };
   const mount = (path: string) => {
     ui.cleanup();
     return ui.render(<MemoryRouter initialEntries={[path]}><AuthProvider><App /><Location /></AuthProvider></MemoryRouter>);
@@ -176,5 +177,57 @@ test('authentication UI integrates with the real session API', async t => {
     assert.match(ui.screen.getByRole('alert').textContent ?? '', /Cannot reach Brightloop/);
     assert.equal(ui.screen.getByRole('button', { name: 'Sign in' }).matches(':disabled'), false);
     failedLogin = false;
+  });
+
+  await t.test('admin staff screen creates an account, clears its password and handles duplicate email', async () => {
+    cookie = ''; await login('ui-admin@example.test'); await waitRoute('/');
+    ui.fireEvent.click(ui.screen.getByRole('link', { name: 'Team access' })); await waitRoute('/staff');
+    await ui.screen.findByRole('heading', { name: 'Add a staff member' });
+    fill('Full name', 'New UI Staff'); fill('Staff email address', 'new-ui-staff@example.test'); fill('Initial password', password);
+    ui.fireEvent.click(ui.screen.getByRole('button', { name: 'Create staff account' }));
+    await ui.screen.findByText(/Staff account created\./, {}, { timeout: 8000 });
+    assert.equal((ui.screen.getByLabelText('Initial password') as HTMLInputElement).value, '');
+    await ui.screen.findByRole('cell', { name: 'new-ui-staff@example.test' }, { timeout: 8000 });
+    assert.equal((await db.user.findUniqueOrThrow({ where: { email: 'new-ui-staff@example.test' } })).role, 'STAFF');
+    fill('Full name', 'Duplicate'); fill('Staff email address', 'new-ui-staff@example.test'); fill('Initial password', password);
+    ui.fireEvent.click(ui.screen.getByRole('button', { name: 'Create staff account' }));
+    await ui.screen.findByRole('alert', {}, { timeout: 8000 });
+    assert.match(ui.screen.getByRole('alert').textContent ?? '', /already exists/);
+    ui.fireEvent.click(ui.screen.getByRole('button', { name: 'Sign out' })); await waitRoute('/account/login');
+  });
+
+  await t.test('forgot password UI sends an offline email without exposing its token', async () => {
+    ui.fireEvent.click(ui.screen.getByRole('link', { name: 'Forgot password?' })); await waitRoute('/account/forgot-password');
+    fill('Registered email address', 'ui-customer@example.test');
+    ui.fireEvent.click(ui.screen.getByRole('button', { name: 'Send reset link' }));
+    await ui.screen.findByText(/If an active account exists/, {}, { timeout: 8000 });
+    const { waitForPasswordResetDeliveries } = await import('../server/src/modules/auth/password-reset.js');
+    await waitForPasswordResetDeliveries();
+    assert.equal(outboxMessages().length, 1);
+    assert.ok(!ui.screen.getByRole('main').textContent?.includes('#token='));
+  });
+
+  await t.test('reset UI removes the URL token, checks confirmation and requires sign-in after success', async () => {
+    const link = resetLink(outboxMessages()[0].body);
+    mount(`${link.pathname}${link.hash}`);
+    await ui.screen.findByRole('heading', { name: 'Choose a new password.' });
+    await ui.waitFor(() => assert.equal(ui.screen.getByTestId('route').getAttribute('data-has-fragment'), 'false'));
+    fill('New password', 'UpdatedPass!2026'); fill('Confirm new password', 'MismatchPass!2026');
+    ui.fireEvent.click(ui.screen.getByRole('button', { name: 'Update password' }));
+    await ui.screen.findByText('Passwords do not match');
+    fill('Confirm new password', 'UpdatedPass!2026');
+    ui.fireEvent.click(ui.screen.getByRole('button', { name: 'Update password' }));
+    await ui.screen.findByRole('heading', { name: 'Password updated.' }, { timeout: 8000 });
+    ui.fireEvent.click(ui.screen.getByRole('link', { name: 'Back to sign in' })); await waitRoute('/account/login');
+    fill('Email address', 'ui-customer@example.test'); fill('Password', 'UpdatedPass!2026');
+    ui.fireEvent.click(ui.screen.getByRole('button', { name: 'Sign in' })); await waitRoute('/portal/subscriptions');
+    ui.fireEvent.click(ui.screen.getByRole('button', { name: 'Sign out' })); await waitRoute('/account/login');
+    mount(`${link.pathname}${link.hash}`);
+    fill('New password', 'UpdatedAgain!2026'); fill('Confirm new password', 'UpdatedAgain!2026');
+    ui.fireEvent.click(ui.screen.getByRole('button', { name: 'Update password' }));
+    await ui.screen.findByRole('link', { name: 'Request a new reset link' }, { timeout: 8000 });
+    mount('/account/reset-password');
+    assert.ok(ui.screen.getByRole('link', { name: 'Request a new reset link' }));
+    assert.equal(ui.screen.queryByLabelText('New password'), null);
   });
 });

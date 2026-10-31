@@ -18,11 +18,11 @@ test('foundation API and unfinished modules remain explicit', async t => {
       assert.equal((await response.json()).error.code, 'UNAUTHENTICATED');
     }
   });
-  await t.test('password reset stays unimplemented until Hour 4', async () => {
+  await t.test('password recovery requires validated input', async () => {
     for (const route of ['/auth/forgot-password', '/auth/reset-password']) {
       const response = await fetch(`${base}${route}`, { method: 'POST' });
-      assert.equal(response.status, 501);
-      assert.equal((await response.json()).error.code, 'NOT_IMPLEMENTED');
+      assert.equal(response.status, 400);
+      assert.equal((await response.json()).error.code, 'VALIDATION_ERROR');
     }
   });
   await t.test('unknown API is a structured 404', async () => {

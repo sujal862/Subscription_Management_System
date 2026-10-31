@@ -1,5 +1,6 @@
 import { Navigate, Route, Routes, Link } from 'react-router-dom';
 import { AuthPage } from './features/auth/AuthPage';
+import { PasswordRecoveryPage } from './features/auth/PasswordRecoveryPage';
 import { ProtectedRoute, PublicAccountRoute } from './features/auth/ProtectedRoute';
 import { DashboardPage } from './features/dashboard/DashboardPage';
 import { StaffPage } from './features/staff/StaffPage';
@@ -13,10 +14,12 @@ import './features/auth/auth.css';
 
 export function App() {
   return <Routes>
+    <Route path="account/reset-password" element={<PasswordRecoveryPage key="reset-password" mode="reset" />} />
     <Route element={<PublicAccountRoute />}>
       <Route path="account" element={<Navigate to="/account/login" replace />} />
       <Route path="account/login" element={<AuthPage key="login" mode="login" />} />
       <Route path="account/signup" element={<AuthPage key="signup" mode="signup" />} />
+      <Route path="account/forgot-password" element={<PasswordRecoveryPage key="forgot-password" mode="forgot" />} />
       <Route path="account/*" element={<main className="auth-status"><h1>Page not available</h1><Link to="/account/login">Back to sign in</Link></main>} />
     </Route>
     <Route element={<ProtectedRoute />}><Route element={<Layout />}>
