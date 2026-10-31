@@ -10,7 +10,7 @@ import { ZodError } from 'zod';
 import { HttpError } from '../server/src/lib/http.js';
 import type { ErrorRequestHandler } from 'express';
 
-test('catalog step 1 to 4: products, variants, plans lifecycle/archive, and tax rules in isolation', async t => {
+test('catalog step 1 to 6: products, variants, plans, taxes, discounts, and e2e flow verification in isolation', async t => {
   const directory = mkdtempSync(path.join(tmpdir(), 'brightloop-catalog-test-'));
   const dbPath = path.join(directory, 'test.db');
   process.env.DATABASE_URL = `file:${dbPath.replaceAll('\\', '/')}`;
@@ -854,16 +854,407 @@ test('catalog step 1 to 4: products, variants, plans lifecycle/archive, and tax 
     });
 
     // -------------------------------------------------------------------------
-    // Step 5 discounts remain pending
+    // Step 5: Discount Rules (CRUD, Validation, Single-Discount Preview & Archive)
     // -------------------------------------------------------------------------
 
-    await t.test('Step 5 discounts still return 501 NOT_IMPLEMENTED', async () => {
+    let subDiscountId = '';
+    let prodDiscountId = '';
+
+    await t.test('unauthenticated discount access returns 401', async () => {
+      const res = await fetch(`${base}/discounts`);
+      assert.equal(res.status, 401);
+    });
+
+    await t.test('customer role cannot access or mutate discounts (403 FORBIDDEN)', async () => {
+      const getRes = await fetch(`${base}/discounts`, {
+        headers: { 'x-user-role': 'CUSTOMER' },
+      });
+      assert.equal(getRes.status, 403);
+
+      const postRes = await fetch(`${base}/discounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'CUSTOMER' },
+        body: JSON.stringify({
+          name: 'Customer Discount Hack',
+          kind: 'PERCENTAGE',
+          scope: 'SUBSCRIPTION',
+          value: 5000,
+          startsAt: '2026-01-01',
+        }),
+      });
+      assert.equal(postRes.status, 403);
+    });
+
+    await t.test('staff role can read discounts but cannot mutate (mutations require ADMIN)', async () => {
+      const getRes = await fetch(`${base}/discounts`, {
+        headers: { 'x-user-role': 'STAFF' },
+      });
+      assert.equal(getRes.status, 200);
+
+      const postRes = await fetch(`${base}/discounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'STAFF' },
+        body: JSON.stringify({
+          name: 'Staff Unauthorized Discount',
+          kind: 'FIXED',
+          scope: 'SUBSCRIPTION',
+          value: 10000,
+          startsAt: '2026-01-01',
+        }),
+      });
+      assert.equal(postRes.status, 403);
+    });
+
+    await t.test('admin creates subscription-scoped percentage discount (10% = 1000 bps)', async () => {
       const res = await fetch(`${base}/discounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Annual Subscription 10% Off',
+          kind: 'PERCENTAGE',
+          scope: 'SUBSCRIPTION',
+          value: 1000, // 1000 basis points = 10%
+          minimumPurchaseMinor: 400000, // ₹4,000.00
+          minimumQuantity: 1,
+          startsAt: '2026-01-01T00:00:00.000Z',
+          endsAt: '2026-12-31T23:59:59.000Z',
+          usageLimit: 100,
+          isActive: true,
+        }),
+      });
+      assert.equal(res.status, 201);
+      const body = await res.json();
+      subDiscountId = body.data.id;
+      assert.equal(body.data.name, 'Annual Subscription 10% Off');
+      assert.equal(body.data.kind, 'PERCENTAGE');
+      assert.equal(body.data.scope, 'SUBSCRIPTION');
+      assert.equal(body.data.value, 1000);
+      assert.equal(body.data.productId, null);
+      assert.equal(body.data.minimumPurchaseMinor, 400000);
+      assert.equal(body.data.usageLimit, 100);
+    });
+
+    await t.test('admin creates product-scoped fixed discount (₹500 = 50000 paise)', async () => {
+      const res = await fetch(`${base}/discounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Core Workspace ₹500 Discount',
+          kind: 'FIXED',
+          scope: 'PRODUCT',
+          productId: mainProductId,
+          value: 50000, // 50000 paise = ₹500.00
+          minimumPurchaseMinor: 0,
+          minimumQuantity: 1,
+          startsAt: '2026-01-01T00:00:00.000Z',
+          isActive: true,
+        }),
+      });
+      assert.equal(res.status, 201);
+      const body = await res.json();
+      prodDiscountId = body.data.id;
+      assert.equal(body.data.name, 'Core Workspace ₹500 Discount');
+      assert.equal(body.data.kind, 'FIXED');
+      assert.equal(body.data.scope, 'PRODUCT');
+      assert.equal(body.data.productId, mainProductId);
+      assert.equal(body.data.value, 50000);
+    });
+
+    await t.test('discount validation rejects percentage > 10000 bps, negative values, and scope mismatches', async () => {
+      // Percentage > 100% (> 10000 bps)
+      const overPctRes = await fetch(`${base}/discounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Too generous',
+          kind: 'PERCENTAGE',
+          scope: 'SUBSCRIPTION',
+          value: 10001,
+          startsAt: '2026-01-01',
+        }),
+      });
+      assert.equal(overPctRes.status, 400);
+
+      // Negative value
+      const negRes = await fetch(`${base}/discounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Negative discount',
+          kind: 'FIXED',
+          scope: 'SUBSCRIPTION',
+          value: -100,
+          startsAt: '2026-01-01',
+        }),
+      });
+      assert.equal(negRes.status, 400);
+
+      // Product scope missing productId
+      const missingProdRes = await fetch(`${base}/discounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Missing product',
+          kind: 'FIXED',
+          scope: 'PRODUCT',
+          value: 5000,
+          startsAt: '2026-01-01',
+        }),
+      });
+      assert.equal(missingProdRes.status, 400);
+
+      // Product scope with non-existent productId
+      const nonExistentProdRes = await fetch(`${base}/discounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Fake product',
+          kind: 'FIXED',
+          scope: 'PRODUCT',
+          productId: 'non-existent-product-id',
+          value: 5000,
+          startsAt: '2026-01-01',
+        }),
+      });
+      assert.equal(nonExistentProdRes.status, 400);
+
+      // Subscription scope with productId specified
+      const subWithProdRes = await fetch(`${base}/discounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Conflict scope',
+          kind: 'PERCENTAGE',
+          scope: 'SUBSCRIPTION',
+          productId: mainProductId,
+          value: 1000,
+          startsAt: '2026-01-01',
+        }),
+      });
+      assert.equal(subWithProdRes.status, 400);
+
+      // Invalid dates (endsAt < startsAt)
+      const invalidDatesRes = await fetch(`${base}/discounts`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Backwards dates',
+          kind: 'FIXED',
+          scope: 'SUBSCRIPTION',
+          value: 5000,
+          startsAt: '2026-12-31',
+          endsAt: '2026-01-01',
+        }),
+      });
+      assert.equal(invalidDatesRes.status, 400);
+    });
+
+    await t.test('GET /discounts lists and filters rules', async () => {
+      const res = await fetch(`${base}/discounts?page=1&pageSize=10`, {
+        headers: { 'x-user-role': 'STAFF' },
+      });
+      assert.equal(res.status, 200);
+      const body = await res.json();
+      assert.ok(Array.isArray(body.data.items));
+      assert.ok(body.data.total >= 2);
+
+      // Filter by scope
+      const subOnlyRes = await fetch(`${base}/discounts?scope=SUBSCRIPTION`, {
+        headers: { 'x-user-role': 'STAFF' },
+      });
+      assert.equal(subOnlyRes.status, 200);
+      const subOnlyBody = await subOnlyRes.json();
+      assert.ok(subOnlyBody.data.items.every((d: any) => d.scope === 'SUBSCRIPTION'));
+
+      // Filter by productId
+      const prodOnlyRes = await fetch(`${base}/discounts?productId=${mainProductId}`, {
+        headers: { 'x-user-role': 'STAFF' },
+      });
+      assert.equal(prodOnlyRes.status, 200);
+      const prodOnlyBody = await prodOnlyRes.json();
+      assert.ok(prodOnlyBody.data.items.some((d: any) => d.id === prodDiscountId));
+    });
+
+    await t.test('GET /discounts/:id and PATCH /discounts/:id', async () => {
+      const getRes = await fetch(`${base}/discounts/${subDiscountId}`, {
+        headers: { 'x-user-role': 'STAFF' },
+      });
+      assert.equal(getRes.status, 200);
+      const getBody = await getRes.json();
+      assert.equal(getBody.data.id, subDiscountId);
+
+      const patchRes = await fetch(`${base}/discounts/${subDiscountId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({
+          name: 'Updated 15% Annual Discount',
+          value: 1500, // 15%
+          usageLimit: 250,
+        }),
+      });
+      assert.equal(patchRes.status, 200);
+      const patchBody = await patchRes.json();
+      assert.equal(patchBody.data.name, 'Updated 15% Annual Discount');
+      assert.equal(patchBody.data.value, 1500);
+      assert.equal(patchBody.data.usageLimit, 250);
+    });
+
+    await t.test('POST /discounts/preview demonstrates deterministic single-discount policy', async () => {
+      // Lines meeting the minimum purchase threshold of ₹4,000 (400000 paise)
+      // Line: mainProduct × 1 unit @ 439900 paise (₹4,399.00)
+      // 15% of 439900 = 65985 paise savings vs ₹500 (50000 paise).
+      // Deterministic policy selects 15% (highest savings).
+      const previewRes = await fetch(`${base}/discounts/preview`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'STAFF' },
+        body: JSON.stringify({
+          lines: [
+            { productId: mainProductId, quantity: 1, unitPriceMinor: 439900, taxRateBps: 1800 },
+          ],
+          periodStart: '2026-06-01T00:00:00.000Z',
+        }),
+      });
+      assert.equal(previewRes.status, 200);
+      const previewBody = await previewRes.json();
+      assert.equal(previewBody.data.eligible, true);
+      assert.equal(previewBody.data.selectedDiscount.id, subDiscountId);
+      assert.equal(previewBody.data.savingsMinor, 65985); // 15% of 439900 = 65985 paise
+
+      // Verify that preview did NOT increment discount uses
+      const checkDiscount = await db.discountRule.findUnique({ where: { id: subDiscountId } });
+      assert.equal(checkDiscount?.uses, 0);
+    });
+
+    await t.test('discount archiving via archive/unarchive and DELETE /discounts/:id', async () => {
+      const archiveRes = await fetch(`${base}/discounts/${prodDiscountId}/archive`, {
+        method: 'POST',
         headers: { 'x-user-role': 'ADMIN' },
       });
-      assert.equal(res.status, 501);
-      const body = await res.json();
-      assert.equal(body.error.code, 'NOT_IMPLEMENTED');
+      assert.equal(archiveRes.status, 200);
+      assert.equal((await archiveRes.json()).data.isActive, false);
+
+      const unarchiveRes = await fetch(`${base}/discounts/${prodDiscountId}/unarchive`, {
+        method: 'POST',
+        headers: { 'x-user-role': 'ADMIN' },
+      });
+      assert.equal(unarchiveRes.status, 200);
+      assert.equal((await unarchiveRes.json()).data.isActive, true);
+
+      // DELETE archives rather than hard deleting
+      const deleteRes = await fetch(`${base}/discounts/${prodDiscountId}`, {
+        method: 'DELETE',
+        headers: { 'x-user-role': 'ADMIN' },
+      });
+      assert.equal(deleteRes.status, 200);
+      const deleteBody = await deleteRes.json();
+      assert.equal(deleteBody.data.isActive, false);
+      assert.equal(deleteBody.data.archived, true);
+    });
+
+    // -------------------------------------------------------------------------
+    // Step 6: End-to-End Workflow & Old Invoice Snapshot Preservation
+    // -------------------------------------------------------------------------
+
+    await t.test('catalog edits preserve existing issued invoice and subscription line snapshots', async () => {
+      // 1. Create a customer
+      const cust = await db.customer.create({
+        data: {
+          name: 'Snapshot Preservation Buyer',
+          email: 'buyer-preserve@brightloop.local',
+        },
+      });
+
+      // 2. Create subscription with lines snapshotting product price and tax rate
+      const sub = await db.subscription.create({
+        data: {
+          number: 'SUB-SNAPSHOT-001',
+          customerId: cust.id,
+          planId: monthlyPlanId,
+          status: 'ACTIVE',
+          startDate: new Date('2026-06-01T00:00:00.000Z'),
+          paymentTermDays: 7,
+          billingInterval: 'MONTHLY',
+          lines: {
+            create: [
+              {
+                productId: mainProductId,
+                description: 'Original Product Snapshot',
+                quantity: 1,
+                unitPriceMinor: 439900, // original price ₹4,399.00
+                taxRuleId: gst18Id,
+                taxRateBps: 1800,        // original 18% tax
+              },
+            ],
+          },
+        },
+      });
+
+      // 3. Create an invoice capturing the original amounts
+      const originalSubtotal = 439900;
+      const originalTax = Math.round((originalSubtotal * 1800) / 10000); // 79182
+      const originalTotal = originalSubtotal + originalTax; // 519082
+
+      const invoice = await db.invoice.create({
+        data: {
+          number: 'INV-SNAPSHOT-001',
+          customerId: cust.id,
+          customerName: cust.name,
+          customerEmail: cust.email,
+          subscriptionId: sub.id,
+          status: 'CONFIRMED',
+          periodStart: new Date('2026-06-01T00:00:00.000Z'),
+          periodEnd: new Date('2026-07-01T00:00:00.000Z'),
+          dueDate: new Date('2026-06-08T00:00:00.000Z'),
+          subtotalMinor: originalSubtotal,
+          taxMinor: originalTax,
+          discountMinor: 0,
+          totalMinor: originalTotal,
+          lines: {
+            create: [
+              {
+                productId: mainProductId,
+                description: 'Original Product Snapshot Line',
+                quantity: 1,
+                unitPriceMinor: originalSubtotal,
+                taxRateBps: 1800,
+                taxMinor: originalTax,
+                discountMinor: 0,
+                amountMinor: originalTotal,
+              },
+            ],
+          },
+        },
+        include: { lines: true },
+      });
+
+      assert.equal(invoice.subtotalMinor, 439900);
+      assert.equal(invoice.taxMinor, 79182);
+
+      // 4. Admin edits the product price and tax rule in catalog
+      const patchProd = await fetch(`${base}/products/${mainProductId}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({ salesPriceMinor: 999900 }), // increased to ₹9,999.00
+      });
+      assert.equal(patchProd.status, 200);
+
+      const patchTax = await fetch(`${base}/taxes/${gst18Id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json', 'x-user-role': 'ADMIN' },
+        body: JSON.stringify({ rateBps: 500 }), // reduced to 5%
+      });
+      assert.equal(patchTax.status, 200);
+
+      // 5. Verify the existing invoice and subscription lines retained their exact snapshots!
+      const invoiceAfter = await db.invoice.findUnique({
+        where: { id: invoice.id },
+        include: { lines: true },
+      });
+      assert.ok(invoiceAfter);
+      assert.equal(invoiceAfter.subtotalMinor, 439900, 'Original invoice subtotal must not be recalculated');
+      assert.equal(invoiceAfter.taxMinor, 79182, 'Original invoice tax must not be recalculated');
+      assert.equal(invoiceAfter.lines[0].unitPriceMinor, 439900, 'Original line unit price must be preserved');
+      assert.equal(invoiceAfter.lines[0].taxRateBps, 1800, 'Original line tax rate must be preserved');
     });
   } finally {
     server.closeAllConnections();

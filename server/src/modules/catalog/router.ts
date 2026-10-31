@@ -2,8 +2,9 @@ import { Router } from 'express';
 import { z } from 'zod';
 import { db } from '../../lib/db.js';
 import { HttpError, asyncRoute } from '../../lib/http.js';
+import { selectBestEligibleDiscount } from '../billing/discounts.js';
 import type { Request, Response, RequestHandler } from 'express';
-import type { Prisma } from '@prisma/client';
+import type { Prisma, DiscountKind, DiscountScope } from '@prisma/client';
 
 export const catalogRouter = Router();
 
@@ -179,6 +180,110 @@ const listTaxesQuerySchema = z.object({
   pageSize: z.coerce.number().int().min(1).max(100).default(20),
   search: z.string().trim().optional(),
   isActive: z.enum(['true', 'false']).optional(),
+});
+
+// Discount rule schemas (Step 5)
+// PERCENTAGE: basis points (0 to 10000; 1000 = 10%)
+// FIXED: paise (> 0)
+const isoDateTimeSchema = z.string().trim().refine(val => {
+  const d = new Date(val);
+  return Number.isFinite(d.getTime());
+}, 'Invalid date/time format')
+.transform(val => new Date(val));
+
+const createDiscountSchema = z.object({
+  name: z.string()
+    .trim()
+    .min(1, 'Discount rule name cannot be empty')
+    .max(255, 'Discount rule name cannot exceed 255 characters'),
+  kind: z.enum(['FIXED', 'PERCENTAGE'] as const),
+  scope: z.enum(['PRODUCT', 'SUBSCRIPTION'] as const),
+  value: z.number()
+    .int('Discount value must be an integer')
+    .min(0, 'Discount value cannot be negative'),
+  productId: z.string().trim().nullable().optional(),
+  minimumPurchaseMinor: z.number()
+    .int('Minimum purchase must be an integer paise amount')
+    .min(0, 'Minimum purchase cannot be negative')
+    .default(0),
+  minimumQuantity: z.number()
+    .int('Minimum quantity must be an integer')
+    .min(1, 'Minimum quantity must be at least 1')
+    .default(1),
+  startsAt: isoDateTimeSchema,
+  endsAt: isoDateTimeSchema.nullable().optional(),
+  usageLimit: z.number()
+    .int('Usage limit must be an integer')
+    .min(1, 'Usage limit must be at least 1')
+    .nullable()
+    .optional(),
+  isActive: z.boolean().optional().default(true),
+}).superRefine((data, ctx) => {
+  if (data.kind === 'PERCENTAGE' && data.value > 10000) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'Percentage discount cannot exceed 10000 basis points (100%)',
+      path: ['value'],
+    });
+  }
+  if (data.scope === 'PRODUCT') {
+    if (!data.productId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Product-scoped discount requires a valid productId',
+        path: ['productId'],
+      });
+    }
+  } else if (data.scope === 'SUBSCRIPTION') {
+    if (data.productId) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        message: 'Whole-subscription scoped discount cannot specify a productId',
+        path: ['productId'],
+      });
+    }
+  }
+  if (data.endsAt && data.startsAt && data.endsAt < data.startsAt) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'endsAt must be on or after startsAt',
+      path: ['endsAt'],
+    });
+  }
+});
+
+const updateDiscountSchema = z.object({
+  name: z.string().trim().min(1).max(255).optional(),
+  kind: z.enum(['FIXED', 'PERCENTAGE'] as const).optional(),
+  scope: z.enum(['PRODUCT', 'SUBSCRIPTION'] as const).optional(),
+  value: z.number().int().min(0).optional(),
+  productId: z.string().trim().nullable().optional(),
+  minimumPurchaseMinor: z.number().int().min(0).optional(),
+  minimumQuantity: z.number().int().min(1).optional(),
+  startsAt: isoDateTimeSchema.optional(),
+  endsAt: isoDateTimeSchema.nullable().optional(),
+  usageLimit: z.number().int().min(1).nullable().optional(),
+  isActive: z.boolean().optional(),
+});
+
+const listDiscountsQuerySchema = z.object({
+  page: z.coerce.number().int().min(1).default(1),
+  pageSize: z.coerce.number().int().min(1).max(100).default(20),
+  search: z.string().trim().optional(),
+  scope: z.enum(['PRODUCT', 'SUBSCRIPTION'] as const).optional(),
+  kind: z.enum(['FIXED', 'PERCENTAGE'] as const).optional(),
+  isActive: z.enum(['true', 'false']).optional(),
+  productId: z.string().trim().optional(),
+});
+
+const previewDiscountSchema = z.object({
+  lines: z.array(z.object({
+    productId: z.string().min(1, 'Product ID is required'),
+    quantity: z.number().int('Quantity must be an integer').min(1, 'Quantity must be at least 1'),
+    unitPriceMinor: z.number().int('Unit price must be an integer paise amount').min(0),
+    taxRateBps: z.number().int().min(0).max(10000).default(0),
+  })).min(1, 'At least one line is required for eligibility preview'),
+  periodStart: isoDateTimeSchema.optional(),
 });
 
 // ---------------------------------------------------------------------------
@@ -863,10 +968,252 @@ catalogRouter.post('/taxes/:id/unarchive', requireAdmin, asyncRoute(async (req: 
 }));
 
 // ---------------------------------------------------------------------------
-// Pending catalog features for future hours (return 501 as required)
+// Discount Rules Endpoints (Step 5)
 // ---------------------------------------------------------------------------
 
-// Step 5 discounts remain pending
-catalogRouter.all(['/discounts', '/discounts/*'], (_req, res) => {
-  res.status(501).json({ error: { code: 'NOT_IMPLEMENTED', message: 'Discounts are not implemented yet.' } });
-});
+// POST /discounts/preview - Read-only eligibility preview (STAFF or ADMIN)
+// Evaluates active discount rules using Member 4's deterministic 1-discount policy.
+// Does NOT mutate database, increment redemptions, or alter invoice transactions.
+catalogRouter.post('/discounts/preview', requireStaffOrAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const data = previewDiscountSchema.parse(req.body);
+  const periodStart = data.periodStart ?? new Date();
+
+  // Load all active discount rules
+  const candidateRules = await db.discountRule.findMany({
+    where: { isActive: true },
+    include: {
+      product: {
+        select: { id: true, name: true, type: true, salesPriceMinor: true, isActive: true },
+      },
+    },
+  });
+
+  const bestCandidate = selectBestEligibleDiscount(candidateRules, data.lines, periodStart);
+
+  if (!bestCandidate) {
+    return void res.json({
+      data: {
+        eligible: false,
+        selectedDiscount: null,
+        savingsMinor: 0,
+        productLineIndex: null,
+        policy: 'Deterministic single-discount policy (highest savings selected, discounts do not stack)',
+        message: 'No active discount rules are eligible for this line combination and threshold.',
+      },
+    });
+  }
+
+  res.json({
+    data: {
+      eligible: true,
+      selectedDiscount: bestCandidate.rule,
+      savingsMinor: bestCandidate.savingsMinor,
+      productLineIndex: bestCandidate.productLineIndex ?? null,
+      policy: 'Deterministic single-discount policy (highest savings selected, discounts do not stack)',
+    },
+  });
+}));
+
+// GET /discounts - List discount rules with pagination and filters (STAFF or ADMIN)
+catalogRouter.get('/discounts', requireStaffOrAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const query = listDiscountsQuerySchema.parse(req.query);
+  const where: Prisma.DiscountRuleWhereInput = {};
+
+  if (query.search) {
+    where.name = { contains: query.search };
+  }
+  if (query.scope) {
+    where.scope = query.scope;
+  }
+  if (query.kind) {
+    where.kind = query.kind;
+  }
+  if (query.isActive !== undefined) {
+    where.isActive = query.isActive === 'true';
+  }
+  if (query.productId) {
+    where.productId = query.productId;
+  }
+
+  const [total, items] = await Promise.all([
+    db.discountRule.count({ where }),
+    db.discountRule.findMany({
+      where,
+      include: {
+        product: {
+          select: { id: true, name: true, type: true, salesPriceMinor: true, isActive: true },
+        },
+      },
+      skip: (query.page - 1) * query.pageSize,
+      take: query.pageSize,
+      orderBy: { createdAt: 'desc' },
+    }),
+  ]);
+
+  res.json({
+    data: {
+      items,
+      page: query.page,
+      pageSize: query.pageSize,
+      total,
+    },
+  });
+}));
+
+// GET /discounts/:id - Single discount rule details (STAFF or ADMIN)
+catalogRouter.get('/discounts/:id', requireStaffOrAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const discountRule = await db.discountRule.findUnique({
+    where: { id: req.params.id },
+    include: {
+      product: {
+        select: { id: true, name: true, type: true, salesPriceMinor: true, isActive: true },
+      },
+    },
+  });
+  if (!discountRule) {
+    throw new HttpError(404, 'NOT_FOUND', 'Discount rule not found');
+  }
+  res.json({ data: discountRule });
+}));
+
+// POST /discounts - Create discount rule (ADMIN only)
+catalogRouter.post('/discounts', requireAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const data = createDiscountSchema.parse(req.body);
+
+  if (data.scope === 'PRODUCT' && data.productId) {
+    const product = await db.product.findUnique({ where: { id: data.productId } });
+    if (!product) {
+      throw new HttpError(400, 'VALIDATION_ERROR', 'Referenced product does not exist');
+    }
+  }
+
+  const discountRule = await db.discountRule.create({
+    data: {
+      name: data.name,
+      kind: data.kind,
+      scope: data.scope,
+      value: data.value,
+      productId: data.scope === 'PRODUCT' ? data.productId : null,
+      minimumPurchaseMinor: data.minimumPurchaseMinor,
+      minimumQuantity: data.minimumQuantity,
+      startsAt: data.startsAt,
+      endsAt: data.endsAt ?? null,
+      usageLimit: data.usageLimit ?? null,
+      isActive: data.isActive,
+    },
+    include: {
+      product: true,
+    },
+  });
+
+  res.status(201).json({ data: discountRule });
+}));
+
+// PATCH /discounts/:id - Update discount rule (ADMIN only)
+catalogRouter.patch('/discounts/:id', requireAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const existing = await db.discountRule.findUnique({
+    where: { id: req.params.id },
+  });
+  if (!existing) {
+    throw new HttpError(404, 'NOT_FOUND', 'Discount rule not found');
+  }
+
+  const data = updateDiscountSchema.parse(req.body);
+
+  const effectiveKind = data.kind ?? existing.kind;
+  const effectiveValue = data.value !== undefined ? data.value : existing.value;
+  if (effectiveKind === 'PERCENTAGE' && effectiveValue > 10000) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'Percentage discount cannot exceed 10000 basis points (100%)');
+  }
+
+  const effectiveScope = data.scope ?? existing.scope;
+  let effectiveProductId = data.productId !== undefined ? data.productId : existing.productId;
+
+  if (effectiveScope === 'PRODUCT') {
+    if (!effectiveProductId) {
+      throw new HttpError(400, 'VALIDATION_ERROR', 'Product-scoped discount requires a valid productId');
+    }
+    const product = await db.product.findUnique({ where: { id: effectiveProductId } });
+    if (!product) {
+      throw new HttpError(400, 'VALIDATION_ERROR', 'Referenced product does not exist');
+    }
+  } else {
+    // Whole subscription scope cannot have productId
+    effectiveProductId = null;
+  }
+
+  const effectiveStartsAt = data.startsAt ?? existing.startsAt;
+  const effectiveEndsAt = data.endsAt !== undefined ? data.endsAt : existing.endsAt;
+  if (effectiveEndsAt && effectiveStartsAt && effectiveEndsAt < effectiveStartsAt) {
+    throw new HttpError(400, 'VALIDATION_ERROR', 'endsAt must be on or after startsAt');
+  }
+
+  const updated = await db.discountRule.update({
+    where: { id: req.params.id },
+    data: {
+      ...data,
+      productId: effectiveProductId,
+    },
+    include: {
+      product: true,
+    },
+  });
+
+  res.json({ data: updated });
+}));
+
+// DELETE /discounts/:id - Archive discount rule instead of deleting financial history (ADMIN only)
+catalogRouter.delete('/discounts/:id', requireAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const existing = await db.discountRule.findUnique({
+    where: { id: req.params.id },
+    include: {
+      _count: {
+        select: {
+          redemptions: true,
+        },
+      },
+    },
+  });
+  if (!existing) {
+    throw new HttpError(404, 'NOT_FOUND', 'Discount rule not found');
+  }
+
+  // Archive discount rule to protect financial records and historical redemption snapshots
+  const archived = await db.discountRule.update({
+    where: { id: req.params.id },
+    data: { isActive: false },
+    include: { product: true },
+  });
+
+  res.json({
+    data: {
+      ...archived,
+      archived: true,
+      message: 'Discount rule archived to preserve redemption history and financial integrity.',
+    },
+  });
+}));
+
+// POST /discounts/:id/archive - Explicit archive endpoint (ADMIN only)
+catalogRouter.post('/discounts/:id/archive', requireAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const existing = await db.discountRule.findUnique({ where: { id: req.params.id } });
+  if (!existing) throw new HttpError(404, 'NOT_FOUND', 'Discount rule not found');
+  const updated = await db.discountRule.update({
+    where: { id: req.params.id },
+    data: { isActive: false },
+    include: { product: true },
+  });
+  res.json({ data: updated });
+}));
+
+// POST /discounts/:id/unarchive - Explicit restore endpoint (ADMIN only)
+catalogRouter.post('/discounts/:id/unarchive', requireAdmin, asyncRoute(async (req: Request, res: Response) => {
+  const existing = await db.discountRule.findUnique({ where: { id: req.params.id } });
+  if (!existing) throw new HttpError(404, 'NOT_FOUND', 'Discount rule not found');
+  const updated = await db.discountRule.update({
+    where: { id: req.params.id },
+    data: { isActive: true },
+    include: { product: true },
+  });
+  res.json({ data: updated });
+}));
