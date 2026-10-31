@@ -5,7 +5,8 @@ authentication, protected navigation, staff management, password recovery and a 
 business dashboard.** Integrated teammates' code includes products/variants/plans,
 customers, templates, subscription lifecycle, taxes, recurring invoices and payments.
 The full final demo is incomplete: discount management, invoice send/print actions
-and customer business portals are still pending in the current integrated main.
+and the customer invoice portal are still pending in the current integrated main.
+The customer subscription portal is integrated with ownership checks.
 See [submission verification](docs/HOUR_5_6_HANDOFF.md) for evidence and gaps.
 
 ## Start locally
@@ -145,7 +146,7 @@ partial payment, check the Dashboard and then record the remaining balance. The
 invoice becomes PAID and the Dashboard reflects the collection. The real HTTP
 integration test covers this flow. Account creation, persistence, permissions,
 staff management and recovery can also be demonstrated. Never directly edit the
-demo DB to present unimplemented discount/portal actions as working. See the handoff
+demo DB to present unimplemented discount/invoice-portal actions as working. See the handoff
 for the remaining end-to-end demo blockers.
 
 Production-style local serving: `npm run build`, then set APP_URL to

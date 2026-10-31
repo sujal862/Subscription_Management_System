@@ -6,10 +6,9 @@ integrated `381cdf1` (Member 2 taxes and Member 4 confirmation/payments/discount
 engine) after a final fetch. A named local stash preserved all dashboard changes
 during that fast-forward; its application had no conflicts. No teammate files
 were overwritten with an older version.
-No feature commit, branch push or main merge is made in this handoff: the explicit
-instruction to stop for review/push takes precedence over publishing during Hour 6.
-After review use the normal fetch/merge/check/push workflow; main must receive this
-work before submission. Do not imply uncommitted work is already on GitHub.
+The initial handoff stopped uncommitted for review. The user subsequently authorized
+commit, push and merge. During publication, main `7ab4a9f` added Member 3's secure
+customer subscription portal; it was merged without conflicts before final checks.
 
 ## Dashboard implementation
 
@@ -48,6 +47,8 @@ Final npm run check passed on integrated main 381cdf1 plus the proposed changes:
 TypeScript checks, all 184 tests and the frontend/backend production build. Git diff
 --check also passed. Rollup emits non-fatal third-party Zod comment-annotation
 warnings; no stack/package upgrade was introduced to suppress them.
+Publication recheck after integrating main 7ab4a9f passed all 208 tests, TypeScript
+checks and the production build, including Member 3's secure portal integration.
 
 Focused API tests cover empty totals, roles, net/tax/discount accounting, multiple
 partial payments, paid/draft/cancelled cases, overpayment clamping, overdue equality,
@@ -90,7 +91,7 @@ verification. No visual browser result is claimed.
 | Requirement | Current evidence / remaining work |
 |---|---|
 | Unique email/password/session/reset | Backend + real-session DOM tests; SMTP tested against local test server. External inbox configuration remains manual. |
-| Admin/staff/customer roles | Server gates, staff creation, escalation denial and protected navigation tested. Customer business resource routes still pending. |
+| Admin/staff/customer roles | Server gates, staff creation, escalation denial and protected navigation tested. Secure customer subscription resources are integrated; customer invoices remain pending. |
 | Products, variants, plans and taxes | Implemented; catalog tests and cross-module HTTP test cover integration. |
 | Lifecycle flags and transitions | Member 3 lifecycle tests cover activation, pause/resume, early close, renewal, scheduler and anchor dates. |
 | Customers, subscriptions and templates | Existing DB tests plus new API demo test; quotations preserve snapshots. |
@@ -98,14 +99,14 @@ verification. No visual browser result is claimed.
 | Confirm/cancel/send/print invoices | Confirm/cancel implemented by Member 4; payment cancellation restriction tested. Send/print endpoints are still absent (404). |
 | Payments and Paid state | API/UI recording implemented by Member 4. Real authenticated integration verifies partial/final payments, balances, tax vs net revenue and Paid transition. |
 | Taxes/discounts and redemption limits | Tax management implemented. Catalog discount endpoints still return 501. Billing discount engine/redemption logic exists with fixture tests; full user-configured discount workflow remains unavailable. |
-| Customer subscription/invoice portals | Placeholder pages/501 API routers. Cross-customer business access cannot be fully demonstrated until owner-scoped resource handlers exist. Gates themselves deny inappropriate roles. |
+| Customer subscription/invoice portals | Member 3's subscription portal is integrated, including owner-scoped queries and cross-customer denial tests. The invoice portal remains a placeholder/501 router. |
 | Dashboard/report filters | Implemented and tested in this change, including thousands-record query measurement. |
 | Persistent dynamic/local data | SQLite persistence and real APIs. Local file-email mode works offline after dependencies are installed; GitHub/installation/SMTP require connectivity. |
 | Responsive navigation | Existing CSS adapts at 760px; dashboard cards adapt at 1000/500px; DOM tests verify role-visible links. Visual review outstanding. |
-| Git participation/latest main | History preserved; individual hourly pushes are a human/team process, not proven by automated tests. These final changes await user review/push and integration into main. |
+| Git participation/latest main | History preserved; individual hourly pushes are a human/team process, not proven by automated tests. User authorized publication after review; final branch hashes are reported after push. |
 
 The complete final demo cannot yet run through discount management, invoice
-send/print and the customer's own portal. Report those gaps before submission rather
+send/print and the customer's invoice portal. Report those gaps before submission rather
 than presenting direct DB edits as implemented features. No shared demo password or
 secret is committed. Configure a private admin using npm run admin:create; signup
 creates customer accounts, and admins create staff from Team access.
