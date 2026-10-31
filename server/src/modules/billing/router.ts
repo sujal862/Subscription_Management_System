@@ -4,6 +4,7 @@ import { pendingRouter } from '../../lib/pending-router.js';
 import { asyncRoute, HttpError } from '../../lib/http.js';
 import { listInvoices, getInvoiceById } from './service.js';
 import { calculateInvoice, type LineCalculationInput } from './calculation.js';
+import { runBillingCycle } from './recurring.js';
 import { db } from '../../lib/db.js';
 import type { InvoiceStatus } from '@prisma/client';
 
@@ -84,6 +85,25 @@ billingRouter.post('/invoices/preview', asyncRoute(async (req, res) => {
       ...calculated,
     },
   });
+}));
+
+const runBillingCycleSchema = z.object({
+  targetDate: z.string().optional(),
+  subscriptionId: z.string().optional(),
+  maxCatchUpCycles: z.number().int().positive().optional(),
+});
+
+// POST /api/billing/run - Execute recurring billing cycle for due active subscriptions
+billingRouter.post('/run', asyncRoute(async (req, res) => {
+  const body = runBillingCycleSchema.parse(req.body || {});
+  const targetDate = body.targetDate ? new Date(body.targetDate) : new Date();
+  const result = await runBillingCycle({
+    targetDate,
+    subscriptionId: body.subscriptionId,
+    maxCatchUpCycles: body.maxCatchUpCycles,
+  });
+
+  res.json({ data: result });
 }));
 
 // Member 4: Customer invoices portal will be implemented in Hour 5.
