@@ -25,6 +25,8 @@
 .sub-editor { border-top: 3px solid var(--green); }
 .sub-template-detail { border: 1px solid var(--border); border-radius: 8px; padding: 18px; margin: 20px 0; }
 .sub-template-detail h3 { overflow-wrap: anywhere; }
+.sub-lifecycle { padding: 16px 0; border-block: 1px solid var(--border); margin-block: 16px; }
+.sub-lifecycle-run { margin-block: 16px; font-size: .85rem; }
 .sub-details { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); gap: 20px; }
 .sub-details dt { color: var(--muted); font-size: .78rem; }
 .sub-details dd { margin: 6px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; }

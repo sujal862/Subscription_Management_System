@@ -126,7 +126,8 @@ test('quotation templates and quotations use independent database records', asyn
       assert.equal(converted.nextBillingDate, null); assert.equal(converted.billingAnchorDay, null);
       assert.ok(Math.abs(Date.parse(converted.quotationValidUntil) - Date.now() - 10 * 86400000) < 5000);
       await request(`/subscriptions/${draft.id}/transition`, 'POST', { action: 'QUOTATION' }, 409);
-      for (const input of [{ action: 'ACTIVE' }, { action: 'CONFIRMED' }, { action: 'QUOTATION', validDays: 0 }, { action: 'QUOTATION', status: 'ACTIVE' }]) await request(`/subscriptions/${draft.id}/transition`, 'POST', input, 400);
+      await request(`/subscriptions/${draft.id}/transition`, 'POST', { action: 'ACTIVE' }, 409);
+      for (const input of [{ action: 'UNKNOWN' }, { action: 'QUOTATION', validDays: 0 }, { action: 'QUOTATION', status: 'ACTIVE' }]) await request(`/subscriptions/${draft.id}/transition`, 'POST', input, 400);
       await request('/subscriptions/missing/transition', 'POST', { action: 'QUOTATION' }, 404);
     });
     await t.test('failed template replacement and quotation insertion roll back atomically', async () => {

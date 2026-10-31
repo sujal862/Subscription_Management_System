@@ -26,7 +26,7 @@ const templateInclude = {
     taxRule: { select: { name: true, rateBps: true } },
   } },
 } satisfies Prisma.QuotationTemplateInclude;
-const quotationInclude = { customer: true, plan: { select: { id: true, name: true, interval: true, minimumQuantity: true } }, lines: true } as const;
+const quotationInclude = { customer: true, plan: { select: { id: true, name: true, interval: true, minimumQuantity: true, allowPause: true, allowEarlyClose: true, allowRenew: true, autoClose: true } }, lines: true } as const;
 type Line = z.infer<typeof lineSchema>[number];
 
 // Templates have no position field. Put the plan product first on reads and copies;
@@ -138,7 +138,6 @@ export async function createQuotation(input: z.infer<typeof quotationSchema>) {
   });
 }
 
-export const transitionSchema = z.object({ action: z.literal('QUOTATION'), validDays: z.number().int().min(1).max(365).default(14) }).strict();
 export async function quoteDraft(id: string, validDays: number) {
   return db.$transaction(async tx => {
     const draft = await tx.subscription.findUnique({ where: { id }, include: quotationInclude }) ?? missing('Subscription');
