@@ -23,6 +23,8 @@
 .sub-loading { display: grid; gap: 12px; padding: 20px 0; }
 .sub-loading span { height: 42px; border-radius: 6px; background: #eef2ed; }
 .sub-editor { border-top: 3px solid var(--green); }
+.sub-template-detail { border: 1px solid var(--border); border-radius: 8px; padding: 18px; margin: 20px 0; }
+.sub-template-detail h3 { overflow-wrap: anywhere; }
 .sub-details { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 210px), 1fr)); gap: 20px; }
 .sub-details dt { color: var(--muted); font-size: .78rem; }
 .sub-details dd { margin: 6px 0 0; overflow-wrap: anywhere; white-space: pre-wrap; }
