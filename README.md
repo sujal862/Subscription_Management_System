@@ -1,10 +1,12 @@
 # Brightloop - Subscription Management System
 
-One repository for a four-person hackathon team. **Member 1 Hours 1-4 provide session
-authentication, protected navigation, admin staff management and email password recovery.**
-Member 3's customer/subscription drafts and Member 4's initial invoice work are
-integrated from main. Business reporting remains future work. Unfinished APIs return HTTP 501
-after authentication/authorization (401/403 if access is denied).
+One repository for a four-person hackathon team. **Member 1 Hours 1-6 provide session
+authentication, protected navigation, staff management, password recovery and a real
+business dashboard.** Integrated teammates' code includes products/variants/plans,
+customers, templates, subscription lifecycle, taxes, recurring invoices and payments.
+The full final demo is incomplete: discount management, invoice send/print actions
+and customer business portals are still pending in the current integrated main.
+See [submission verification](docs/HOUR_5_6_HANDOFF.md) for evidence and gaps.
 
 ## Start locally
 
@@ -70,7 +72,7 @@ branches entirely, use the serialized main workflow in TEAM.md instead.
 |---|---|
 | npm run setup | Prepare local environment/database without destructive resets |
 | npm run dev | Start React and API together; Ctrl+C stops both |
-| npm run check | Typecheck, scaffold smoke tests, production build |
+| npm run check | Typecheck, backend/DOM integration tests and production build |
 | npm run db:studio | Inspect your local database |
 | npm run db:migrate -- --name descriptive_change | Leader creates a coordinated schema migration |
 | npm run db:deploy | Apply teammates' committed migrations after pulling |
@@ -97,12 +99,11 @@ docs/prompts/          one prompt per member per hour
 tests/                 backend and DOM integration tests with isolated databases
 ```
 
-Included libraries for later steps: Zod, cookie-parser, express-rate-limit and
-Nodemailer. Zod, cookie-parser and rate limits are used by the Hour 1 backend;
-Nodemailer now supports SMTP and the explicit offline outbox.
-The product must eventually persist business data, authorize every request, support
-the customer portal and pass the final acceptance checklist. This starter alone
-does not satisfy the hackathon problem statement.
+Zod, cookie-parser, rate limits and Nodemailer support validation, real cookie
+sessions and email delivery. Local application data persists in SQLite. After npm
+ci has completed, normal offline use needs no cloud APIs; dependency installation
+and GitHub synchronization require network access. The pending business features
+mean this version does not yet satisfy every problem-statement requirement.
 
 ## Member 1 Hour 1 handoff
 
@@ -121,3 +122,35 @@ Run npm ci after pulling to install the pinned DOM-testing development dependenc
 See [staff and password recovery notes](docs/HOUR_3_4_HANDOFF.md). No schema migration
 or new package is needed for these steps. New configuration keys are optional
 administrator bootstrap fields, MAIL_OUTBOX_DIR and SMTP_REQUIRE_TLS.
+
+## Dashboard and submission
+
+After pulling these changes run `npm run setup` to apply the dashboard index
+migration. `/` shows active subscriptions, pre-tax invoiced revenue, collected,
+outstanding and overdue balances. Date filters select invoice issue days in
+Asia/Kolkata. Payments/balances are current for those invoices; active subscriptions
+always counts all current ACTIVE records. Draft/cancelled invoices never contribute.
+The overdue list is paginated on the server. Definitions are in the API contract.
+
+There are **no shipped demo credentials**. Configure your own private ADMIN_EMAIL
+and ADMIN_PASSWORD, run `npm run admin:create`, sign in, and create staff via Team
+access. Use public signup for a new customer identity; matching an existing customer
+email does not claim that record. This intentionally avoids a shared known password.
+
+For a current demo: admin creates product/variant/plan in Catalog; create a customer,
+quotation template and quotation in Subscriptions; add a configured tax rule to a line;
+confirm then activate with a start date on/before today; run Billing for today and
+repeat to demonstrate no duplicate. Confirm the generated draft invoice, record a
+partial payment, check the Dashboard and then record the remaining balance. The
+invoice becomes PAID and the Dashboard reflects the collection. The real HTTP
+integration test covers this flow. Account creation, persistence, permissions,
+staff management and recovery can also be demonstrated. Never directly edit the
+demo DB to present unimplemented discount/portal actions as working. See the handoff
+for the remaining end-to-end demo blockers.
+
+Production-style local serving: `npm run build`, then set APP_URL to
+`http://localhost:4000` in private .env and run `npm start`; use localhost consistently.
+For internet deployment use HTTPS, the matching APP_URL/ALLOWED_ORIGINS and SMTP.
+Reset URLs require HTTPS in production; the default HTTP offline reset demo runs
+using `npm run dev`. Production Secure cookies require a suitable browser/HTTPS
+environment; no hosted deployment is included or verified.

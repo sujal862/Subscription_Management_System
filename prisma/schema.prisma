@@ -269,6 +269,7 @@ model Invoice {
   @@index([customerId, status])
   @@index([status, dueDate])
   @@index([issuedAt])
+  @@index([status, issuedAt])
 }
 
 model InvoiceLine {

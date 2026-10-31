@@ -69,12 +69,12 @@ billingRouter.post('/invoices/:id/cancel', asyncRoute(async (req, res) => {
 }));
 
 const recordPaymentSchema = z.object({
-  method: z.string().min(1, 'Payment method is required'),
-  amountMinor: z.number().int().positive('Payment amount must be a positive integer in paise'),
-  paidAt: z.string().optional(),
-  note: z.string().optional(),
-  reference: z.string().optional(),
-});
+  method: z.string().trim().min(1, 'Payment method is required').max(50),
+  amountMinor: z.number().int().positive('Payment amount must be a positive integer in paise').max(2147483647),
+  paidAt: z.iso.datetime({ offset: true }).optional(),
+  note: z.string().max(2000).optional(),
+  reference: z.string().max(200).optional(),
+}).strict();
 
 // GET /api/billing/invoices/:id/payments - List recorded payments for invoice
 billingRouter.get('/invoices/:id/payments', asyncRoute(async (req, res) => {
@@ -138,10 +138,10 @@ billingRouter.post('/invoices/preview', asyncRoute(async (req, res) => {
 }));
 
 const runBillingCycleSchema = z.object({
-  targetDate: z.string().optional(),
-  subscriptionId: z.string().optional(),
-  maxCatchUpCycles: z.number().int().positive().optional(),
-});
+  targetDate: z.iso.datetime({ offset: true }).optional(),
+  subscriptionId: z.string().min(1).max(100).optional(),
+  maxCatchUpCycles: z.number().int().positive().max(100).optional(),
+}).strict();
 
 // POST /api/billing/run - Execute recurring billing cycle for due active subscriptions
 billingRouter.post('/run', asyncRoute(async (req, res) => {
@@ -153,7 +153,10 @@ billingRouter.post('/run', asyncRoute(async (req, res) => {
     maxCatchUpCycles: body.maxCatchUpCycles,
   });
 
-  res.json({ data: result });
+  res.json({ data: { ...result, errors: result.errors.map(error => ({
+    subscriptionId: error.subscriptionId, subscriptionNumber: error.subscriptionNumber,
+    error: 'Billing could not complete for this subscription. Check its configuration and retry.',
+  })) } });
 }));
 
 // Member 4: Customer invoices portal will be implemented in Hour 5.

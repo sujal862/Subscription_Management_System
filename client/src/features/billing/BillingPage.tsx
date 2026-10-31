@@ -279,11 +279,11 @@ export function BillingPage() {
           <span className="stat-value">{formatMoney(totalInvoiced)}</span>
         </div>
         <div className="stat-card">
-          <span className="stat-label">Cash Collected</span>
+          <span className="stat-label">Cash Collected (Page)</span>
           <span className="stat-value" style={{ color: '#03543f' }}>{formatMoney(totalPaid)}</span>
         </div>
         <div className="stat-card">
-          <span className="stat-label">Outstanding Balance</span>
+          <span className="stat-label">Outstanding Balance (Page)</span>
           <span className="stat-value" style={{ color: totalOutstanding > 0 ? '#92400e' : 'inherit' }}>
             {formatMoney(totalOutstanding)}
           </span>
